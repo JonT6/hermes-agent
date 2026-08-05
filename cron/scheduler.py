@@ -2786,6 +2786,9 @@ def _call_was_never_invoked(content: str) -> bool:
 def _every_tool_call_errored(result: dict) -> Optional[str]:
     """Reason string if this turn's every tool call was rejected before running.
 
+    DETECTOR ONLY -- this decides nothing. Its caller logs the result and lets
+    the job stand. See the observe-only note in _agent_run_failed.
+
     Only the CURRENT turn is examined -- we walk back to the user message that
     started it, so a prior turn's failure cannot condemn this one.
 
@@ -2864,7 +2867,20 @@ def _agent_run_failed(result: dict) -> Optional[str]:
     if max_iteration_summary:
         return None
 
-    return _every_tool_call_errored(result)
+    # AIA-13 is OBSERVE-ONLY here on purpose. _every_tool_call_errored() detects
+    # a turn that did no work, but it decides nothing: the run_job call site
+    # logs it and carries on. The detector keys off substrings of arbitrary tool
+    # output ('are required', 'was not invoked'), chosen from two observed
+    # error strings out of a registry of ~100 tools. Nobody has evidence about
+    # what those match across the rest of that surface, and a false positive
+    # would fail a job that actually worked -- on four live cron jobs, on the
+    # box that runs the operator's primary interface.
+    #
+    # So: log first, gather the rate from real traffic, and promote this to a
+    # real failure later as a one-line change made on data rather than on my
+    # guess. The visibility is the part that mattered anyway -- a silent no-op
+    # becomes greppable the moment it happens.
+    return None
 
 
 def run_job(
@@ -3784,6 +3800,19 @@ def run_job(
         _failure_reason = _agent_run_failed(result)
         if _failure_reason:
             raise RuntimeError(_failure_reason)
+
+        # AIA-13, observe-only: a turn that attempted tools and had every call
+        # rejected before it ran did no work, but the job still reports success.
+        # Logged rather than failed while the detector earns trust -- see
+        # _agent_run_failed. Grep: "did no work".
+        try:
+            _no_work = _every_tool_call_errored(result)
+        except Exception as _nw_err:
+            logger.debug("Job '%s': no-work check failed: %s", job_id, _nw_err)
+            _no_work = None
+        if _no_work:
+            logger.error("Job '%s' (ID: %s) did no work: %s",
+                         job_name, job_id, _no_work)
         if max_iteration_summary:
             logger.warning(
                 "Job '%s' reached the iteration limit but produced a final fallback response; "
