@@ -18,7 +18,7 @@ A gap between accumulated exceptions is invisible; a named predicate is not.
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from cron.scheduler import _agent_run_failed
+from cron.scheduler import _agent_run_failed, _every_tool_call_errored
 
 
 def _tool(name, content):
@@ -55,7 +55,7 @@ class TestEveryToolCallErrored:
             {'role': 'user', 'content': 'ask leo'},
             _tool('a2a_call', "Error: both 'agent' and 'message' are required."),
         ], final_response='PINPROBE-TOOL-UNAVAILABLE')
-        reason = _agent_run_failed(r)
+        reason = _every_tool_call_errored(r)
         assert reason is not None
         assert 'a2a_call' in reason
 
@@ -64,7 +64,7 @@ class TestEveryToolCallErrored:
             {'role': 'user', 'content': 'ask leo'},
             _tool('tool_call', '{"error": "tool_call to a2a_call is missing required argument(s): agent, message. The tool was NOT invoked."}'),
         ])
-        assert _agent_run_failed(r) is not None
+        assert _every_tool_call_errored(r) is not None
 
     def test_one_success_among_failures_is_not_a_failure(self):
         r = _ok_result(messages=[
@@ -72,11 +72,11 @@ class TestEveryToolCallErrored:
             _tool('a2a_call', 'Error: both required.'),
             _tool('a2a_call', 'Leo says: 0.3.0'),
         ])
-        assert _agent_run_failed(r) is None
+        assert _every_tool_call_errored(r) is None
 
     def test_a_turn_with_no_tool_calls_is_not_a_failure(self):
         r = _ok_result(messages=[{'role': 'user', 'content': 'just write a poem'}])
-        assert _agent_run_failed(r) is None
+        assert _every_tool_call_errored(r) is None
 
     def test_only_the_current_turn_is_examined(self):
         """A prior turn's failed tool call must not condemn this one."""
@@ -86,12 +86,12 @@ class TestEveryToolCallErrored:
             {'role': 'user', 'content': 'new request'},
             _tool('a2a_call', 'Leo says: 0.3.0'),
         ])
-        assert _agent_run_failed(r) is None
+        assert _every_tool_call_errored(r) is None
 
     def test_missing_messages_key_does_not_raise(self):
         r = {'failed': False, 'completed': True, 'turn_exit_reason': '',
              'final_response': 'x'}
-        assert _agent_run_failed(r) is None
+        assert _every_tool_call_errored(r) is None
 
 
 class TestAToolThatRanIsNotAJobFailure:
@@ -108,18 +108,41 @@ class TestAToolThatRanIsNotAJobFailure:
             {'role': 'user', 'content': 'check the service'},
             _tool('terminal', '{"exit_code": 1, "error": "connection refused"}'),
         ], final_response='The service is down: connection refused.')
-        assert _agent_run_failed(r) is None
+        assert _every_tool_call_errored(r) is None
 
     def test_a_tool_reporting_a_real_error_result_is_not_a_failure(self):
         r = _ok_result(messages=[
             {'role': 'user', 'content': 'fetch it'},
             _tool('web_search', '{"error": "upstream returned 503"}'),
         ], final_response='Upstream is returning 503.')
-        assert _agent_run_failed(r) is None
+        assert _every_tool_call_errored(r) is None
 
     def test_a_missing_file_is_an_answer_not_a_job_failure(self):
         r = _ok_result(messages=[
             {'role': 'user', 'content': 'read the log'},
             _tool('read_file', 'Error: File not found: /var/log/nope.log'),
         ], final_response='That log does not exist.')
-        assert _agent_run_failed(r) is None
+        assert _every_tool_call_errored(r) is None
+
+
+class TestObserveOnly:
+    '''The log-only contract, asserted rather than assumed.
+
+    The detector keys off substrings of arbitrary tool output, chosen from two
+    observed errors out of a registry of ~100 tools. Nobody has evidence about
+    what they match across the rest of that surface, so a detection must NOT
+    fail a job yet. Promoting it later should require deleting this test --
+    which is the point: it makes the promotion a deliberate act.
+    '''
+
+    def _never_invoked(self):
+        return _ok_result(messages=[
+            {'role': 'user', 'content': 'ask leo'},
+            _tool('a2a_call', "Error: both 'agent' and 'message' are required."),
+        ], final_response='PINPROBE-TOOL-UNAVAILABLE')
+
+    def test_the_detector_fires(self):
+        assert _every_tool_call_errored(self._never_invoked()) is not None
+
+    def test_but_the_job_is_not_failed(self):
+        assert _agent_run_failed(self._never_invoked()) is None
