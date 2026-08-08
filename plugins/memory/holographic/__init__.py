@@ -33,6 +33,27 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Untrusted-origin content (AIA-16)
+# ---------------------------------------------------------------------------
+
+# The opening of the envelope the A2A adapter prepends to inbound peer text.
+# Source of truth: plugins/platforms/a2a/security.py::PRIVACY_PREFIX. It is
+# duplicated rather than imported so the memory plugin keeps no dependency on
+# a platform plugin that may not be installed; the duplication is pinned by
+# test_holographic_untrusted_peer.py, which fails if the two ever drift apart.
+_A2A_INBOUND_MARKER = "[A2A inbound —"
+
+# Facts from an untrusted origin get their own category and a trust score
+# below the ``min_trust_threshold`` floor that ``prefetch()`` applies (default
+# 0.3). They stay searchable through an explicit fact_store call, but can
+# never be auto-injected into a prompt — which is where
+# build_memory_context_block() would re-frame them as "authoritative
+# reference data ... should inform all responses".
+UNTRUSTED_PEER_CATEGORY = "untrusted_peer"
+UNTRUSTED_PEER_TRUST = 0.0
+
+
+# ---------------------------------------------------------------------------
 # Tool schemas (unchanged from original PR)
 # ---------------------------------------------------------------------------
 
@@ -429,10 +450,31 @@ class HolographicMemoryProvider(MemoryProvider):
             if not isinstance(content, str) or len(content) < 10:
                 continue
 
+            # role == "user" is not the same claim as "the operator said this".
+            # Inbound A2A peer text arrives as a user message, and a peer
+            # writing "I want the real tool output" matches _PREF_PATTERNS —
+            # which filed a reconnaissance probe as one of Jonathan's own
+            # preferences at default trust, whereupon prefetch() served it back
+            # under an "authoritative reference data" banner on later turns
+            # (AIA-16). Substring rather than prefix match: a compaction merge
+            # can move the envelope off position 0, and mislabelling a genuine
+            # message as untrusted merely lowers its trust, whereas missing a
+            # peer message reopens the hole.
+            from_untrusted_peer = _A2A_INBOUND_MARKER in content
+            pref_category = (
+                UNTRUSTED_PEER_CATEGORY if from_untrusted_peer else "user_pref"
+            )
+            decision_category = (
+                UNTRUSTED_PEER_CATEGORY if from_untrusted_peer else "project"
+            )
+            trust = UNTRUSTED_PEER_TRUST if from_untrusted_peer else None
+
             for pattern in _PREF_PATTERNS:
                 if pattern.search(content):
                     try:
-                        self._store.add_fact(content[:400], category="user_pref")
+                        self._store.add_fact(
+                            content[:400], category=pref_category, trust_score=trust
+                        )
                         extracted += 1
                     except Exception:
                         pass
@@ -441,7 +483,9 @@ class HolographicMemoryProvider(MemoryProvider):
             for pattern in _DECISION_PATTERNS:
                 if pattern.search(content):
                     try:
-                        self._store.add_fact(content[:400], category="project")
+                        self._store.add_fact(
+                            content[:400], category=decision_category, trust_score=trust
+                        )
                         extracted += 1
                     except Exception:
                         pass

@@ -190,12 +190,18 @@ class MemoryStore:
         content: str,
         category: str = "general",
         tags: str = "",
+        trust_score: float | None = None,
     ) -> int:
         """Insert a fact and return its fact_id.
 
         Deduplicates by content (UNIQUE constraint). On duplicate, returns
         the existing fact_id without modifying the row. Extracts entities from
         the content and links them to the fact.
+
+        ``trust_score`` defaults to ``self.default_trust``. Callers storing
+        content from an untrusted origin pass an explicit score below the
+        ``min_trust`` floor that ``prefetch()`` enforces, which keeps the fact
+        searchable on demand while barring it from automatic recall (AIA-16).
         """
         with self._lock:
             content = content.strip()
@@ -208,7 +214,12 @@ class MemoryStore:
                     INSERT INTO facts (content, category, tags, trust_score)
                     VALUES (?, ?, ?, ?)
                     """,
-                    (content, category, tags, self.default_trust),
+                    (
+                        content,
+                        category,
+                        tags,
+                        self.default_trust if trust_score is None else trust_score,
+                    ),
                 )
                 self._conn.commit()
                 fact_id: int = cur.lastrowid  # type: ignore[assignment]
