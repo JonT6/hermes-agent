@@ -529,6 +529,101 @@ class TestClientTools:
         assert "input-required" in out
         assert "ctx-q" in out
 
+    # --- AIA-19: D1 (whose failure is it?) and D2 (what actually happened?) ---------
+
+    def _peer_cfg(self, monkeypatch):
+        monkeypatch.setattr(tools, "_load_config",
+                            lambda: {"a2a_agents": {"leo": {"url": "http://localhost:9999"}}})
+        monkeypatch.setattr(tools, "_http_get_json", lambda url, h, t: None)
+
+    def _audit_rows(self, tmp_path):
+        f = tmp_path / "a2a_audit.jsonl"
+        if not f.exists():
+            return []
+        return [json.loads(l) for l in f.read_text().strip().splitlines() if l.strip()]
+
+    # The literal string from the 2026-08-13 incident.
+    PEER_401 = "Failed to authenticate. API Error: 401 OAuth access token has been revoked."
+
+    def test_failed_peer_task_is_attributed_to_the_peer_not_to_us(self, monkeypatch):
+        """D1. The peer's own error must never read as ours.
+
+        On 2026-08-13 this exact artifact came back under a bare `[leo · … · failed]`
+        header and an operator read the peer's dead credential as a problem with our
+        bearer — ~30 minutes spent checking a token that was working the whole time.
+        Everything up to the failure had SUCCEEDED: request delivered, auth accepted,
+        task created. Only the peer's own processing failed."""
+        self._peer_cfg(monkeypatch)
+        monkeypatch.setattr(tools, "_http_post_json", lambda url, body, h, t:
+                            protocol.jsonrpc_result(body["id"], protocol.build_task(
+                                "t1", "ctx-f", protocol.STATE_FAILED, self.PEER_401)))
+        out = tools.a2a_call({"agent": "leo", "message": "go"})
+        assert self.PEER_401 in out                      # the peer's text, verbatim
+        assert "PEER's failure, not ours" in out         # …and unmistakably attributed
+        # Must NOT borrow the vocabulary of OUR OWN auth failure — that collision is D1.
+        assert "Check the configured token" not in out
+
+    def test_our_own_auth_failure_still_reads_as_ours(self, monkeypatch):
+        """The other side of D1, and the reason the fix is a distinction rather than a
+        rewording: a genuine Cawl-side 401 must keep pointing at our config. If both
+        cases say 'look at the peer', the ambiguity has just been moved."""
+        self._peer_cfg(monkeypatch)
+
+        def boom(url, body, h, t):
+            raise urllib.error.HTTPError(url, 401, "Unauthorized", {}, None)
+
+        monkeypatch.setattr(tools, "_http_post_json", boom)
+        out = tools.a2a_call({"agent": "leo", "message": "go"})
+        assert "rejected auth" in out and "Check the configured token" in out
+        assert "PEER's failure" not in out
+
+    def test_a_message_that_never_left_is_not_audited_as_sent(self, monkeypatch, tmp_path):
+        """D2. The audit log is the source of truth for 'did this get out'.
+
+        The audit write used to run BEFORE the POST, so a message killed by a wrong
+        bearer still wrote an `outbound` row. The log did not merely omit the failure —
+        it asserted a send that never happened."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        self._peer_cfg(monkeypatch)
+
+        def boom(url, body, h, t):
+            raise urllib.error.HTTPError(url, 401, "Unauthorized", {}, None)
+
+        monkeypatch.setattr(tools, "_http_post_json", boom)
+        tools.a2a_call({"agent": "leo", "message": "go"})
+        outcomes = [r.get("outcome") for r in self._audit_rows(tmp_path)]
+        assert "relay.queued" not in outcomes, "claimed a send that never reached the wire"
+        assert outcomes == ["relay.failed"]
+
+    def test_http_200_is_queued_and_only_a_terminal_state_is_delivered(self, monkeypatch, tmp_path):
+        """D2 + F4. HTTP 200 means the peer's SERVER accepted it, not that the peer DID it.
+
+        Auditing 'sent' at 200 would swap a lie about transmission for a quieter lie
+        about delivery — the incident was a 200 with a real task id whose task failed
+        seven seconds later. Acceptance and completion are two rows, in that order."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        self._peer_cfg(monkeypatch)
+        monkeypatch.setattr(tools, "_http_post_json", lambda url, body, h, t:
+                            protocol.jsonrpc_result(body["id"], protocol.build_task(
+                                "t2", "ctx-ok", protocol.STATE_COMPLETED, "done")))
+        tools.a2a_call({"agent": "leo", "message": "go"})
+        outcomes = [r.get("outcome") for r in self._audit_rows(tmp_path)]
+        assert outcomes == ["relay.queued", "relay.delivered"]
+
+    def test_a_task_that_failed_is_never_audited_as_delivered(self, monkeypatch, tmp_path):
+        """The row that would have prevented the incident. Transport succeeded perfectly
+        and the task still failed; 'delivered' here would be false in the exact way that
+        cost 30 minutes."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        self._peer_cfg(monkeypatch)
+        monkeypatch.setattr(tools, "_http_post_json", lambda url, body, h, t:
+                            protocol.jsonrpc_result(body["id"], protocol.build_task(
+                                "t3", "ctx-x", protocol.STATE_FAILED, self.PEER_401)))
+        tools.a2a_call({"agent": "leo", "message": "go"})
+        outcomes = [r.get("outcome") for r in self._audit_rows(tmp_path)]
+        assert outcomes == ["relay.queued", "relay.failed"]
+        assert "relay.delivered" not in outcomes
+
     def test_rpc_url_prefers_supported_interfaces(self):
         card = {
             "url": "http://legacy:1/",
