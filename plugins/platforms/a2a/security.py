@@ -354,8 +354,29 @@ def _audit_path() -> Path:
     return base / "a2a_audit.jsonl"
 
 
-def audit(direction: str, peer: str, task_id: str, summary: str) -> None:
-    """Append an audit record. Best-effort — never raises into the caller."""
+def audit(direction: str, peer: str, task_id: str, summary: str,
+          outcome: str | None = None) -> None:
+    """Append an audit record. Best-effort — never raises into the caller.
+
+    ``outcome`` (AIA-19) records what actually HAPPENED to a relay, which this log
+    previously had no field for at all. The record was ``{ts, direction, peer,
+    task_id, summary}`` — so it could not be *wrong* about delivery, it simply never
+    said. Anyone reading a row as "this was delivered" was inferring something the
+    schema never asserted, and on 2026-08-13 an operator did exactly that.
+
+    Values, and the distinctions that matter:
+      ``relay.queued``    — the peer's server accepted it (HTTP 200 + task id).
+                            **This is not delivery.** The incident that produced this
+                            field was a 200 with a real task id whose task failed
+                            seven seconds later.
+      ``relay.delivered`` — the task reached a terminal state and produced a reply.
+                            Only a state check may write this; never a 200.
+      ``relay.failed``    — either the transport never got there (HTTP error, with the
+                            code in ``summary``) or the peer's task terminated failed.
+
+    Optional and defaulted so the inbound/push callers are untouched: a row without
+    it is one this taxonomy does not describe, not a row claiming success.
+    """
     try:
         rec = {
             "ts": time.time(),
@@ -364,6 +385,8 @@ def audit(direction: str, peer: str, task_id: str, summary: str) -> None:
             "task_id": task_id,
             "summary": (summary or "")[:500],
         }
+        if outcome:
+            rec["outcome"] = outcome
         path = _audit_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as fh:

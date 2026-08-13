@@ -241,15 +241,41 @@ def _send_task(agent_label: str, peer: dict, message: str, context_id: str) -> t
     if tenant:
         rpc_body["params"]["tenant"] = tenant
 
-    security.audit("outbound", agent_label, rpc_body["id"], safe_message)
-    protocol.persist_message(ctx, "user", safe_message, rpc_body["id"])
-    protocol.metrics.outbound_total += 1
-
+    # AIA-19 / D2: NOTHING is recorded as sent until the wire says so. This block
+    # used to run BEFORE the POST below, so a message that never left — a wrong
+    # bearer, a peer that was down — still wrote an "outbound" row, while the audit
+    # log is supposed to be the source of truth for "did this get out".
+    #
+    # The reorder alone is NOT enough, and that is the part the spec understated.
+    # A successful POST means the peer's SERVER accepted it; it does not mean the
+    # peer DID it. The 2026-08-13 incident is the proof: HTTP 200, a real task id,
+    # and the task failed seven seconds later on the peer's own auth. Auditing
+    # "sent" at 200 would have swapped a lie about transmission for a quieter lie
+    # about delivery. So the row written here says `relay.queued`, and only the
+    # terminal-state check below may upgrade it to `relay.delivered`.
     rpc_url = _rpc_url(base_url, card)
-    resp = _http_post_json(rpc_url, rpc_body, headers, timeout)
+    try:
+        resp = _http_post_json(rpc_url, rpc_body, headers, timeout)
+    except Exception as exc:
+        # It never left. Record that as its own outcome rather than staying silent:
+        # a missing row is indistinguishable from "nobody looked".
+        code = getattr(exc, "code", None)
+        security.audit("outbound", agent_label, rpc_body["id"],
+                       f"transport failed before delivery: {type(exc).__name__}"
+                       + (f" HTTP {code}" if code else ""),
+                       outcome="relay.failed")
+        raise
     if "error" in resp:
         err = resp["error"]
+        security.audit("outbound", agent_label, rpc_body["id"],
+                       f"peer returned a JSON-RPC error: {err.get('message', err)}",
+                       outcome="relay.failed")
         raise ValueError(f"Peer '{agent_label}' returned an error: {err.get('message', err)}")
+
+    security.audit("outbound", agent_label, rpc_body["id"], safe_message,
+                   outcome="relay.queued")
+    protocol.persist_message(ctx, "user", safe_message, rpc_body["id"])
+    protocol.metrics.outbound_total += 1
 
     result = resp.get("result", {})
     payload = protocol.unwrap_send_message_response(result)
@@ -283,6 +309,16 @@ def _send_task(agent_label: str, peer: dict, message: str, context_id: str) -> t
             reply_ctx = payload.get("contextId", reply_ctx)
 
     reply = _reply_text_from_result(payload)
+    # AIA-19 / D2: the ONLY place allowed to say "delivered", because it is the only
+    # place that has seen a terminal state. A task that terminated FAILED is recorded
+    # as such even though the transport succeeded perfectly — that distinction is the
+    # whole point, and conflating the two is what sent an operator after a phantom
+    # auth problem on 2026-08-13. The `relay.queued` row written at acceptance stays;
+    # this one supersedes it, so the pair reads as a history rather than a verdict.
+    security.audit("outbound", agent_label, task_id or rpc_body["id"],
+                   f"peer task terminal in state {_short_state(state) or 'unknown'}",
+                   outcome=("relay.failed" if state == protocol.STATE_FAILED
+                            else "relay.delivered"))
     protocol.persist_message(reply_ctx, "agent", reply, rpc_body["id"])
     protocol.metrics.inbound_total += 1
     return reply, reply_ctx, state
@@ -391,6 +427,30 @@ def a2a_call(args: dict, **_: Any) -> str:
         body += (
             "\n\n(The peer needs more input — answer by calling a2a_call again "
             f"with context_id '{reply_ctx}'.)"
+        )
+    if state == protocol.STATE_FAILED:
+        # AIA-19 / D1. Everything above this point already succeeded: the request
+        # reached the peer, the bearer was accepted, a task was created. What failed
+        # is the PEER'S OWN processing — and the returned artifact is the peer's error
+        # text, which on 2026-08-13 read "Failed to authenticate. API Error: 401 OAuth
+        # access token has been revoked."
+        #
+        # Rendered as bare `[leo · context … · failed] Failed to authenticate…`, that is
+        # visually indistinguishable from THIS tool's own auth failure a few lines up
+        # ("Error: peer '…' rejected auth (HTTP 401). Check the configured token."). An
+        # operator read the peer's dead credential as ours and spent ~30 minutes
+        # checking a bearer that was working perfectly the whole time.
+        #
+        # A state token alone does not fix that: "failed" does not say WHOSE. So say it
+        # in words. The header is machine-ish and easy to skim past; this is the line
+        # that stops the wrong investigation before it starts.
+        body = (
+            "⚠️ This is the PEER's failure, not ours.\n"
+            f"Our request reached '{agent}' and was accepted — transport and auth to "
+            "the peer are fine. The peer's own task then failed, and the text below is "
+            "ITS error, reported verbatim. Nothing here indicates a problem with our "
+            "bearer token or configuration; look at the peer's side.\n\n"
+            f"{body}"
         )
     return f"{header}\n{body}"
 
