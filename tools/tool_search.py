@@ -37,6 +37,7 @@ for the full rationale):
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import math
@@ -96,6 +97,11 @@ class ToolSearchConfig:
     # Absolute cap on the embedded listing, regardless of context size.
     # Effective budget = min(listing_max_tokens, threshold_pct% of context).
     listing_max_tokens: int = 4000
+    # Tool names the operator pins RESIDENT, never deferred behind the bridge.
+    # Deferral costs a discovery dance (tool_search -> tool_describe ->
+    # tool_call with a correctly-wrapped argument object), and a model that
+    # fumbles that dance on an UNATTENDED path has nobody to re-prompt it.
+    always_visible: tuple[str, ...] = ()
 
     @classmethod
     def from_raw(cls, raw: Any) -> "ToolSearchConfig":
@@ -145,6 +151,15 @@ class ToolSearchConfig:
             listing = "auto"
         listing_max_tokens = max(200, min(60000, _safe_int(raw.get("listing_max_tokens"), 4000)))
 
+        raw_pinned = raw.get('always_visible')
+        if isinstance(raw_pinned, str):
+            raw_pinned = [raw_pinned]
+        if not isinstance(raw_pinned, (list, tuple)):
+            raw_pinned = []
+        always_visible = tuple(
+            str(n).strip() for n in raw_pinned if str(n).strip()
+        )
+
         return cls(
             enabled=enabled,
             threshold_pct=threshold_pct,
@@ -152,6 +167,7 @@ class ToolSearchConfig:
             max_search_limit=max_search_limit,
             listing=listing,
             listing_max_tokens=listing_max_tokens,
+            always_visible=always_visible,
         )
 
 
@@ -201,6 +217,27 @@ def _core_tool_names() -> frozenset[str]:
         return frozenset()
 
 
+@functools.lru_cache(maxsize=1)
+def _pinned_tool_names() -> frozenset[str]:
+    """Tool names the operator pinned resident via tools.tool_search.always_visible.
+
+    AIA-13. Measured 2026-08-05: a2a_call sat in the deferred set, so the
+    model had to discover it and then invoke it through the tool_call
+    bridge. It got the wrapper's arguments wrong on 3 of 4 unattended cron
+    runs; on one of those it gave up after a single failure and the scheduler
+    still logged "completed successfully". An interactive user just re-sends
+    the message. A cron job at 3am does not.
+
+    Cached because this is consulted once per tool per assembly and
+    load_config() reads a file. A config change therefore needs a gateway
+    restart -- the same as every other tool-search setting.
+    """
+    try:
+        return frozenset(load_config().always_visible)
+    except Exception:
+        return frozenset()
+
+
 def is_deferrable_tool_name(name: str) -> bool:
     """Return True if a tool with this name is *eligible* for deferral.
 
@@ -212,6 +249,8 @@ def is_deferrable_tool_name(name: str) -> bool:
     if name in BRIDGE_TOOL_NAMES:
         return False
     if name in _core_tool_names():
+        return False
+    if name in _pinned_tool_names():
         return False
     # Check registry toolset for MCP prefix.
     try:

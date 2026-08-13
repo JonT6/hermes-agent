@@ -3165,6 +3165,128 @@ def _preflight_job_config(job: dict, cfg: dict) -> Optional[str]:
     return None
 
 
+# A tool that RAN and returned an error may be delivering the answer -- a
+# health check reporting "service down" is a job working correctly. A tool that
+# was never invoked because the agent malformed the call cannot be an answer to
+# anything. Only the second is a job failure, so only the second is matched.
+# Measured 2026-08-05, both routes:
+#   bridge : "tool_call to a2a_call is missing required argument(s): agent,
+#             message. The tool was NOT invoked."
+#   direct : "Error: both agent and message are required."
+_NEVER_INVOKED_MARKERS = (
+    "was not invoked",
+    "missing required argument",
+    "are required",
+    "is required",
+)
+
+
+def _call_was_never_invoked(content: str) -> bool:
+    """True when a tool result says the call was rejected before it ran."""
+    probe = content[:500].lower()
+    return any(m in probe for m in _NEVER_INVOKED_MARKERS)
+
+
+def _every_tool_call_errored(result: dict) -> Optional[str]:
+    """Reason string if this turn's every tool call was rejected before running.
+
+    DETECTOR ONLY -- this decides nothing. Its caller logs the result and lets
+    the job stand. See the observe-only note in _agent_run_failed.
+
+    Only the CURRENT turn is examined -- we walk back to the user message that
+    started it, so a prior turn's failure cannot condemn this one.
+
+    Conservative by construction: anything unjudgeable (non-string content from
+    a multimodal or untrusted-wrapped result, an unimportable detector, a tool
+    that genuinely ran and errored) returns None. A missed detection leaves
+    today's behaviour intact; a false positive fails a job that worked, and
+    would turn every watchdog whose check legitimately fails into a false
+    alarm. Only one of those is recoverable.
+    """
+    messages = result.get('messages') or []
+    turn = []
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get('role') == 'user':
+            break
+        turn.append(msg)
+
+    tools = [m for m in reversed(turn) if m.get('role') == 'tool']
+    if not tools:
+        return None
+
+    try:
+        from agent.display import _detect_tool_failure
+    except Exception:
+        return None
+
+    names = []
+    for m in tools:
+        content = m.get('content')
+        if not isinstance(content, str):
+            return None
+        name = str(m.get('tool_name') or m.get('name') or '?')
+        failed, _suffix = _detect_tool_failure(name, content)
+        if not failed or not _call_was_never_invoked(content):
+            return None
+        names.append(name)
+
+    attempted = ', '.join(sorted(set(names)))
+    return (
+        f'every tool call in this turn was rejected before it ran '
+        f'({len(tools)} attempted: {attempted}) and the agent stopped without '
+        f'a successful call -- the job did no work. A cron run has nobody to '
+        f're-prompt it, so this is a failure, not a reply.'
+    )
+
+
+def _agent_run_failed(result: dict) -> Optional[str]:
+    """The single question: did this agent run actually succeed?
+
+    Extracted because the answer used to be spread inline through a 1103-line
+    run_job as the residue of eleven separate issue patches, and a gap between
+    accumulated exceptions is invisible. Measured 2026-08-05: a turn that
+    attempted one tool call, got an argument error, gave up and emitted 25
+    characters was excluded by none of them, so the scheduler logged
+    'completed successfully' for a job that never reached its peer.
+    """
+    turn_exit_reason = str(result.get('turn_exit_reason') or '')
+    final_response_text = (result.get('final_response') or '').strip()
+
+    # An iteration-capped run that still produced a usable summary is a
+    # degraded success, not a failure (#17855 and the max_iterations path).
+    max_iteration_summary = (
+        result.get('failed') is not True
+        and result.get('completed') is False
+        and turn_exit_reason.startswith('max_iterations_reached(')
+        and bool(final_response_text)
+    )
+
+    if result.get('failed') is True or (
+            result.get('completed') is False and not max_iteration_summary):
+        return (result.get('error') or final_response_text
+                or 'agent reported failure')
+
+    if max_iteration_summary:
+        return None
+
+    # AIA-13 is OBSERVE-ONLY here on purpose. _every_tool_call_errored() detects
+    # a turn that did no work, but it decides nothing: the run_job call site
+    # logs it and carries on. The detector keys off substrings of arbitrary tool
+    # output ('are required', 'was not invoked'), chosen from two observed
+    # error strings out of a registry of ~100 tools. Nobody has evidence about
+    # what those match across the rest of that surface, and a false positive
+    # would fail a job that actually worked -- on four live cron jobs, on the
+    # box that runs the operator's primary interface.
+    #
+    # So: log first, gather the rate from real traffic, and promote this to a
+    # real failure later as a one-line change made on data rather than on my
+    # guess. The visibility is the part that mattered anyway -- a silent no-op
+    # becomes greppable the moment it happens.
+    return None
+
+
 def run_job(
     job: dict, *, defer_agent_teardown: Optional[list] = None,
     extra_prompt: Optional[str] = None,
@@ -4258,13 +4380,24 @@ def run_job(
             and turn_exit_reason.startswith("max_iterations_reached(")
             and bool(final_response_text)
         )
-        if result.get("failed") is True or (result.get("completed") is False and not max_iteration_summary):
-            _err_text = (
-                result.get("error")
-                or final_response_text
-                or "agent reported failure"
-            )
-            raise RuntimeError(_err_text)
+        # One predicate owns this decision now -- see _agent_run_failed.
+        # max_iteration_summary stays local purely for the log line below.
+        _failure_reason = _agent_run_failed(result)
+        if _failure_reason:
+            raise RuntimeError(_failure_reason)
+
+        # AIA-13, observe-only: a turn that attempted tools and had every call
+        # rejected before it ran did no work, but the job still reports success.
+        # Logged rather than failed while the detector earns trust -- see
+        # _agent_run_failed. Grep: "did no work".
+        try:
+            _no_work = _every_tool_call_errored(result)
+        except Exception as _nw_err:
+            logger.debug("Job '%s': no-work check failed: %s", job_id, _nw_err)
+            _no_work = None
+        if _no_work:
+            logger.error("Job '%s' (ID: %s) did no work: %s",
+                         job_name, job_id, _no_work)
         if max_iteration_summary:
             logger.warning(
                 "Job '%s' reached the iteration limit but produced a final fallback response; "
