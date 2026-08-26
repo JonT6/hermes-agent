@@ -43,6 +43,13 @@ logger = logging.getLogger(__name__)
 # test_holographic_untrusted_peer.py, which fails if the two ever drift apart.
 _A2A_INBOUND_MARKER = "[A2A inbound —"
 
+# The automatic per-turn skim shows this many facts, but scans wider so the
+# block can state how much it is withholding. A skim that cannot say what it
+# left behind reads as a complete answer, which is exactly why the agent
+# stopped drilling into the store.
+_PREFETCH_SHOW = 5
+_PREFETCH_SCAN = 40
+
 # Facts from an untrusted origin get their own category and a trust score
 # below the ``min_trust_threshold`` floor that ``prefetch()`` applies (default
 # 0.3). They stay searchable through an explicit fact_store call, but can
@@ -199,15 +206,29 @@ class HolographicMemoryProvider(MemoryProvider):
         )
         self._session_id = session_id
 
+    def _recallable_count(self) -> int:
+        """Facts eligible for AUTOMATIC recall, i.e. at or above the trust floor.
+
+        Deliberately excludes the AIA-16 quarantine: untrusted A2A peer content
+        is stored below ``min_trust`` so it stays searchable on demand but never
+        surfaces on its own. Counting it here would advertise it to the model and
+        turn an on-demand escape hatch into an automatic one.
+        """
+        if not self._store:
+            return 0
+        try:
+            row = self._store._conn.execute(
+                "SELECT COUNT(*) FROM facts WHERE trust_score >= ?",
+                (self._min_trust,),
+            ).fetchone()
+            return int(row[0]) if row else 0
+        except Exception:
+            return 0
+
     def system_prompt_block(self) -> str:
         if not self._store:
             return ""
-        try:
-            total = self._store._conn.execute(
-                "SELECT COUNT(*) FROM facts"
-            ).fetchone()[0]
-        except Exception:
-            total = 0
+        total = self._recallable_count()
         if total == 0:
             return (
                 "# Holographic Memory\n"
@@ -217,23 +238,105 @@ class HolographicMemoryProvider(MemoryProvider):
             )
         return (
             f"# Holographic Memory\n"
-            f"Active. {total} facts stored with entity resolution and trust scoring.\n"
-            f"Use fact_store to search, probe entities, reason across entities, or add facts.\n"
-            f"Use fact_feedback to rate facts after using them (trains trust scores)."
+            f"Active. {total} facts stored, with entity resolution and trust scoring.\n"
+            f"\n"
+            f"Any `## Holographic Memory` block in a turn is a KEYWORD SKIM of those "
+            f"{total} facts — it is not the memory itself. It is one full-text match "
+            f"on the user's literal wording, capped at {_PREFETCH_SHOW} results, and "
+            f"it routinely misses facts that are stored and relevant but phrased "
+            f"differently.\n"
+            f"\n"
+            f"## When to search memory BEFORE answering\n"
+            f"This is a trigger list, not a capability note. If ANY of these hold, call "
+            f"fact_store first:\n"
+            f"- the request names a person, project, ticket, repo, host, or tool\n"
+            f"- it asks what was decided, why, or what happened before\n"
+            f"- it assumes shared history (\"the usual\", \"like last time\", \"ours\")\n"
+            f"- the skim block is absent, or showed fewer than {_PREFETCH_SHOW} results\n"
+            f"- you are about to say you don't know, don't recall, or have no record\n"
+            f"\n"
+            f"The last one is absolute: never assert absence on the strength of the skim. "
+            f"The skim not showing something is not evidence it isn't stored.\n"
+            f"\n"
+            f"Actions: search (keywords), probe (one entity), related (neighbours), "
+            f"reason (across entities), contradict (conflicts). Rate what you actually "
+            f"used with fact_feedback — trust scores only improve if you do."
         )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
+        """Build the automatic per-turn memory block as an INDEX, not an answer.
+
+        This block is injected on every turn, so its shape decides whether the
+        agent treats memory as something to consult or something it already has.
+        The previous version emitted five bare bullets with no counts, no ids and
+        no indication of what it withheld — indistinguishable from a complete
+        recall — and the agent rationally stopped calling ``fact_store`` at all.
+
+        Two properties matter more than the contents:
+
+        * it must say how much it is NOT showing, so the model can tell a skim
+          from a recall;
+        * an empty result must still emit a block. Returning "" injects nothing,
+          and *nothing* reads as "memory is empty" rather than "the keyword
+          search missed" — which is how the agent ends up asserting it has no
+          record of something the store holds.
+
+        Counts cover the recallable set only; see :meth:`_recallable_count`.
+        """
         if not self._retriever or not query:
             return ""
         try:
-            results = self._retriever.search(query, min_trust=self._min_trust, limit=5)
-            if not results:
+            total = self._recallable_count()
+            if not total:
                 return ""
-            lines = []
-            for r in results:
-                trust = r.get("trust_score", r.get("trust", 0))
-                lines.append(f"- [{trust:.1f}] {r.get('content', '')}")
-            return "## Holographic Memory\n" + "\n".join(lines)
+
+            # Scan wider than we display, purely so the block can quantify the
+            # gap between "what matched" and "what you are being shown".
+            matches = self._retriever.search(
+                query, min_trust=self._min_trust, limit=_PREFETCH_SCAN
+            )
+            shown = matches[:_PREFETCH_SHOW]
+
+            if not shown:
+                return (
+                    "## Holographic Memory — skim found NOTHING\n"
+                    f"A keyword search of {total} stored facts matched 0 for this "
+                    "request. That means the KEYWORD SEARCH missed. It does not "
+                    "mean memory is empty, and it is not evidence the fact is "
+                    "absent.\n"
+                    "-> Before saying you don't know or have no record: call "
+                    "fact_store(action='search') with different wording, or "
+                    "fact_store(action='probe') on any name in the request."
+                )
+
+            lines, handles = [], []
+            for r in shown:
+                trust = r.get("trust_score", r.get("trust", 0)) or 0.0
+                fid = r.get("fact_id", "?")
+                lines.append(f"- [#{fid} trust {trust:.2f}] {r.get('content', '')}")
+                for tag in str(r.get("tags") or "").replace(",", " ").split():
+                    if tag and tag not in handles:
+                        handles.append(tag)
+
+            withheld = len(matches) - len(shown)
+            out = [
+                f"## Holographic Memory — PARTIAL skim "
+                f"({len(shown)} shown, drawn from {total} stored facts)"
+            ]
+            out.extend(lines)
+            if handles:
+                out.append("Drill handles: " + ", ".join(handles[:8]))
+            out.append(
+                "-> One keyword pass, not a recall. "
+                + (
+                    f"At least {withheld} further match(es) exist that are NOT shown. "
+                    if withheld > 0
+                    else ""
+                )
+                + "If the answer is not COMPLETE above, call fact_store before "
+                "answering rather than reasoning from these lines alone."
+            )
+            return "\n".join(out)
         except Exception as e:
             logger.debug("Holographic prefetch failed: %s", e)
             return ""
@@ -245,6 +348,31 @@ class HolographicMemoryProvider(MemoryProvider):
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [FACT_STORE_SCHEMA, FACT_FEEDBACK_SCHEMA]
+
+    def _results_payload(self, results) -> str:
+        """Serialize retrieval results, recording that they were actually used.
+
+        Every read path in this tool went through ``HolographicRetriever``,
+        which never wrote ``retrieval_count`` — only the unused
+        ``store.search_facts()`` did. The column therefore read 0 for all 807
+        facts whether the agent searched constantly or never, so nothing could
+        distinguish "memory is being consulted" from "memory is being ignored".
+
+        Recording here rather than inside the retriever is deliberate: reaching
+        this method means the model made an explicit fact_store call. The
+        automatic per-turn skim does not pass through here, so the counter stays
+        a measure of DELIBERATE recall.
+        """
+        try:
+            ids = []
+            for r in results or []:
+                if isinstance(r, dict) and isinstance(r.get("fact_id"), int):
+                    ids.append(r["fact_id"])
+            if ids and self._store:
+                self._store.record_retrieval(ids)
+        except Exception as e:  # instrumentation must never break the tool
+            logger.debug("record_retrieval failed (non-fatal): %s", e)
+        return json.dumps({"results": results, "count": len(results)})
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
         if tool_name == "fact_store":
@@ -310,7 +438,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     min_trust=float(args.get("min_trust", self._min_trust)),
                     limit=int(args.get("limit", 10)),
                 )
-                return json.dumps({"results": results, "count": len(results)})
+                return self._results_payload(results)
 
             elif action == "probe":
                 results = retriever.probe(
@@ -318,7 +446,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     category=args.get("category"),
                     limit=int(args.get("limit", 10)),
                 )
-                return json.dumps({"results": results, "count": len(results)})
+                return self._results_payload(results)
 
             elif action == "related":
                 results = retriever.related(
@@ -326,7 +454,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     category=args.get("category"),
                     limit=int(args.get("limit", 10)),
                 )
-                return json.dumps({"results": results, "count": len(results)})
+                return self._results_payload(results)
 
             elif action == "reason":
                 entities = args.get("entities", [])
@@ -337,14 +465,14 @@ class HolographicMemoryProvider(MemoryProvider):
                     category=args.get("category"),
                     limit=int(args.get("limit", 10)),
                 )
-                return json.dumps({"results": results, "count": len(results)})
+                return self._results_payload(results)
 
             elif action == "contradict":
                 results = retriever.contradict(
                     category=args.get("category"),
                     limit=int(args.get("limit", 10)),
                 )
-                return json.dumps({"results": results, "count": len(results)})
+                return self._results_payload(results)
 
             elif action == "update":
                 updated = store.update_fact(
