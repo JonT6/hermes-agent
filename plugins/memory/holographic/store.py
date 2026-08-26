@@ -91,6 +91,32 @@ _RE_AKA          = re.compile(
 )
 
 
+def _strip_nul(text: str) -> str:
+    """Normalise NUL bytes out of text bound for the fact store.
+
+    Restores a guard that ``cawl/CLAUDE.md`` recorded as uncommitted on the Mini
+    and which was subsequently lost. Its original rationale was not recorded, and
+    an honest account of what was measured here (2026-08-26, macOS, SQLite as
+    shipped with CPython 3.12) is that **no failure was reproduced**: FTS5
+    indexed the text on both sides of an embedded NUL, and entity extraction, HRR
+    encoding, ``json.dumps`` and the prefetch block all round-tripped it without
+    complaint.
+
+    So this is deliberately NOT claiming to fix a demonstrated defect. It is
+    normalisation of anomalous input that is free to apply and keeps a control
+    character out of a store whose rows are exported, backed up and rendered
+    elsewhere. If a future reader is tempted to lean on it as a security or
+    integrity control, it has not earned that — measure first.
+
+    Substitutes a SPACE rather than deleting: removing the byte fuses the tokens
+    on either side into one word, which *does* make both terms unsearchable. That
+    one was reproduced.
+    """
+    if not isinstance(text, str):
+        return text
+    return text.replace("\x00", " ")
+
+
 def _clamp_trust(value: float) -> float:
     return max(_TRUST_MIN, min(_TRUST_MAX, value))
 
@@ -204,9 +230,11 @@ class MemoryStore:
         searchable on demand while barring it from automatic recall (AIA-16).
         """
         with self._lock:
-            content = content.strip()
+            content = _strip_nul(content).strip()
             if not content:
                 raise ValueError("content must not be empty")
+            tags = _strip_nul(tags)
+            category = _strip_nul(category)
 
             try:
                 cur = self._conn.execute(
@@ -298,6 +326,32 @@ class MemoryStore:
                 self._conn.commit()
 
             return results
+
+    def record_retrieval(self, fact_ids: list) -> None:
+        """Increment retrieval_count for facts actually surfaced to the model.
+
+        ``search_facts()`` has always done this inline, but the live tool path
+        goes through ``HolographicRetriever``, which selected the column and
+        never wrote it — so retrieval_count read 0 across every fact in the
+        store regardless of use, and there was no way to tell whether the agent
+        consulted its memory at all.
+
+        Deliberately NOT called by the automatic per-turn prefetch: if the
+        background skim incremented this, the counter would measure the skim
+        rather than deliberate recall, and would be just as uninformative as
+        when it was stuck at zero.
+        """
+        ids = [i for i in (fact_ids or []) if isinstance(i, int)]
+        if not ids:
+            return
+        with self._lock:
+            placeholders = ",".join("?" * len(ids))
+            self._conn.execute(
+                f"UPDATE facts SET retrieval_count = retrieval_count + 1 "
+                f"WHERE fact_id IN ({placeholders})",
+                ids,
+            )
+            self._conn.commit()
 
     def update_fact(
         self,

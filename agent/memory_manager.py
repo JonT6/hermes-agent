@@ -166,7 +166,12 @@ _INTERNAL_CONTEXT_RE = re.compile(
     re.IGNORECASE,
 )
 _INTERNAL_NOTE_RE = re.compile(
-    r'\[System note:\s*The following is recalled memory context,\s*NOT new user input\.\s*Treat as (?:informational background data|authoritative reference data[^\]]*)\.\]\s*',
+    # Deliberately open-ended after the "NOT new user input." stem. The trailing
+    # clause has now been reworded twice (informational background -> authoritative
+    # -> partial sample); pinning its exact text means the next rewording silently
+    # leaks the note into user-visible output, because this scrubber is the only
+    # thing keeping it out of the reply stream.
+    r'\[System note:\s*The following is recalled memory context,\s*NOT new user input\.[^\]]*\]\s*',
     re.IGNORECASE,
 )
 
@@ -354,8 +359,10 @@ def build_memory_context_block(raw_context: str) -> str:
     return (
         "<memory-context>\n"
         "[System note: The following is recalled memory context, "
-        "NOT new user input. Treat as authoritative reference data — "
-        "this is the agent's persistent memory and should inform all responses.]\n\n"
+        "NOT new user input. It is a PARTIAL, automatically-retrieved "
+        "sample of the agent's persistent memory — a starting point, not "
+        "the complete record, and not a substitute for searching memory "
+        "directly.]\n\n"
         f"{clean}\n"
         "</memory-context>"
     )
