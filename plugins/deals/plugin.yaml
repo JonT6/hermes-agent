@@ -1,6 +1,6 @@
 name: deals
 version: 0.1.0
-description: "secret-deals approval tools for Jonathan (SEC-14): list, show and status read the worker's candidates; approve, skip, edit, media, pause and resume act on them, and refuse unless the turn came from the configured Telegram user. Every tool runs the worker's own CLI with --json; the plugin holds no business logic."
+description: "secret-deals approval tools for Jonathan (SEC-14): list, show and status read the worker's candidates; approve, skip, edit, media, pause, resume, post_now and get_posts act on them, and refuse unless the turn came from the configured Telegram user. deals_post_now publishes to the public channel at once. deals_get_posts sends Jonathan the two ready-to-copy posts itself: Cawl never re-types, summarises or rewrites post copy, it reports only whether they were sent. Every tool runs the worker's own CLI with --json; the plugin holds no business logic."
 author: Leo (JonT6)
 kind: standalone
 provides_tools:
@@ -13,15 +13,17 @@ provides_tools:
   - deals_media
   - deals_pause
   - deals_resume
+  - deals_post_now
+  - deals_get_posts
 config_schema:
   worker_python:
     type: str
     required: true
-    description: "The worker venv's python, e.g. <worker_dir>/.venv/bin/python. The tools run its sibling console script, bin/secret-deals, as the launchd jobs do."
+    description: "The worker venv's python, e.g. <worker_dir>/.venv/bin/python. The tools, and the card buttons (SEC-71), run its sibling console script, bin/secret-deals, as the launchd jobs do."
   worker_dir:
     type: str
     required: true
-    description: "The secret-deals repo (the directory with pyproject.toml). The worker runs with this as its cwd."
+    description: "The secret-deals repo (the directory with pyproject.toml). The worker runs with this as its cwd, for the tools and the card buttons alike."
   allowed_user_id:
     required: true
-    description: "Jonathan's Telegram user id. Mutating tools refuse unless the turn's originating user is this id on Telegram."
+    description: "Jonathan's Telegram user id, the one owner of every deals action. The mutating tools refuse unless the turn's originating user is this id on Telegram, and the candidate cards' approve/skip buttons (sd: callbacks in the Telegram adapter, SEC-71) read this same setting and refuse any other tapper. Unset refuses everyone, tools and buttons alike."

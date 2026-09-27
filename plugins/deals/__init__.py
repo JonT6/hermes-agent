@@ -1,6 +1,6 @@
 """secret-deals approval tools for Cawl (SEC-14).
 
-Registers nine tools into the ``deals`` toolset. Each runs the secret-deals worker's CLI with
+Registers eleven tools into the ``deals`` toolset. Each runs the secret-deals worker's CLI with
 ``--json`` (contract: ``secret-deals/docs/cawl-contract.md``) and turns its one JSON object into
 fixed-format text. Self-contained on purpose: relative imports only, so the same directory works
 bundled (``plugins/deals``) or dropped into ``~/.hermes/plugins/deals``. Either way it loads only

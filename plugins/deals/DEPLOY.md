@@ -1,16 +1,30 @@
 # Deploying the deals plugin (SEC-14)
 
-Nine tools in the `deals` toolset. `deals_list`, `deals_show` and `deals_status` only read.
-`deals_approve`, `deals_skip`, `deals_edit`, `deals_media`, `deals_pause` and `deals_resume` refuse
-unless the turn came from `allowed_user_id` on Telegram. Every tool runs the worker's CLI with
-`--json` (contract: the secret-deals repo's `docs/cawl-contract.md`). There is no webhook and no
-wake. Cawl answers in the Candidates topic, and a reply to a card carries the card's text.
+Eleven tools in the `deals` toolset. `deals_list`, `deals_show` and `deals_status` only read.
+`deals_approve`, `deals_skip`, `deals_edit`, `deals_media`, `deals_pause`, `deals_resume`,
+`deals_post_now` and `deals_get_posts` refuse unless the turn came from `allowed_user_id` on
+Telegram. Every tool runs the worker's CLI with `--json` (contract: the secret-deals repo's
+`docs/cawl-contract.md`). There is no webhook and no wake. Cawl answers in the Candidates topic,
+and a reply to a card carries the card's text.
+
+- ⚠️ **`deals_post_now` publishes to the public channel at once** (`post-now`, SEC-46). The worker
+  re-checks first and may hold instead, but a post that goes out cannot be taken back by any tool.
+- **`deals_get_posts` sends Jonathan the two ready-to-copy posts itself** (`posts`, SEC-48). The
+  post text is not in the tool result, on purpose. Cawl never re-types, summarises or rewrites
+  post copy: it calls the tool and reports only whether the posts were sent.
+
+The candidate cards' **approve / skip buttons** (SEC-71, `sd:` callbacks in the Telegram adapter,
+not this plugin) read the same `plugins.entries.deals.settings`: the same worker, and the same
+`allowed_user_id` as the one owner. A tap from anyone else is refused.
 
 ## Before you start
 
 - **The worker must have SEC-43 live on the Mini.** The tools pass `--json`. A worker without it
   rejects the flag, and every tool then answers "The worker gave no answer".
   Check from the worker dir: `.venv/bin/secret-deals status --json` prints one JSON line.
+- **`deals_post_now` needs SEC-46 and `deals_get_posts` needs SEC-48 on the worker.** Without
+  them argparse rejects `post-now` / `posts`, and the tool answers the same way. Check with
+  `.venv/bin/secret-deals post-now --help` and `.venv/bin/secret-deals posts --help`.
 - **The tools run `<venv>/bin/secret-deals`**, the sibling of `worker_python`, with `worker_dir`
   as the cwd and a bare environment (PATH, HOME, LANG, LC_ALL, TMPDIR, TZ). This is the same way
   the launchd jobs run. `python -m secret_deals` does not work, because the package has no `__main__`.
@@ -34,7 +48,8 @@ same key. Only the user-dir copy would then run.
 
 ## 2. `~/.hermes/config.yaml`
 
-**Add** to the existing lists. Do not replace them.
+**Add** to the existing lists. Do not replace them. This is every key the plugin and the card
+buttons need; nothing else in `config.yaml` changes.
 
 ```yaml
 plugins:
@@ -50,6 +65,13 @@ plugins:
 platform_toolsets:
   telegram: [a2a, bfl, browser, ..., deals]   # the existing telegram list, plus deals
 ```
+
+- `plugins.enabled` gets `deals`. The tools load only then.
+- `plugins.entries.deals.settings` holds all three settings below. The **card buttons read them
+  even when `deals` is not in `plugins.enabled`**, so this block is needed for the buttons alone.
+- `platform_toolsets.telegram` gets `deals`, so a Telegram session is offered the tools.
+- The buttons' first gate is the adapter's existing callback allowlist: the same Telegram
+  authorisation that already lets Jonathan talk to Cawl. It needs no new key.
 
 ⚠️ **Once enabled, `deals` is on for EVERY platform by default, not only Telegram.** That is
 `hermes_cli/tools_config.py` `_enabled_plugin_toolsets`: a plugin toolset is on unless
@@ -84,7 +106,10 @@ the Candidates topic, start a new session there (`/new`).
 |---|---|
 | `worker_python` | the worker venv's python; the tools run its sibling `secret-deals` script |
 | `worker_dir` | the worker repo, the directory holding `pyproject.toml`; the cwd for every call |
-| `allowed_user_id` | Jonathan's Telegram user id. If it is unset, every action is refused |
+| `allowed_user_id` | Jonathan's Telegram user id, the one owner of every deals action: the mutating tools **and** the card buttons (SEC-71). If it is unset, every tool action and every button tap is refused |
 
-Timeouts are 30 s, and 180 s for `deals_edit` (one or two paid model calls plus a new card). When
-an action times out, the tool says the outcome is unknown and to check with `deals_show`.
+Timeouts are 30 s; 180 s for `deals_edit` (one or two paid model calls plus a new card); 300 s for
+`deals_post_now` and `deals_get_posts` (a live AliExpress re-check or link call, which may sit in
+the client's own rate-limit retries, then Telegram sends with media uploads). When an action times
+out, the tool says the outcome is unknown and to check with `deals_show`. For `deals_post_now`,
+look at the channel too: the post may have gone out.
