@@ -1,0 +1,27 @@
+name: deals
+version: 0.1.0
+description: "secret-deals approval tools for Jonathan (SEC-14): list, show and status read the worker's candidates; approve, skip, edit, media, pause and resume act on them, and refuse unless the turn came from the configured Telegram user. Every tool runs the worker's own CLI with --json; the plugin holds no business logic."
+author: Leo (JonT6)
+kind: standalone
+provides_tools:
+  - deals_list
+  - deals_show
+  - deals_status
+  - deals_approve
+  - deals_skip
+  - deals_edit
+  - deals_media
+  - deals_pause
+  - deals_resume
+config_schema:
+  worker_python:
+    type: str
+    required: true
+    description: "The worker venv's python, e.g. <worker_dir>/.venv/bin/python. The tools run its sibling console script, bin/secret-deals, as the launchd jobs do."
+  worker_dir:
+    type: str
+    required: true
+    description: "The secret-deals repo (the directory with pyproject.toml). The worker runs with this as its cwd."
+  allowed_user_id:
+    required: true
+    description: "Jonathan's Telegram user id. Mutating tools refuse unless the turn's originating user is this id on Telegram."
