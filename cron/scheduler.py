@@ -2001,6 +2001,75 @@ def _run_agent_with_watchdog(
     return result
 
 
+# AIA-13. A tool that RAN and returned an error may be delivering the answer -- a health check
+# reporting "service down" is a job working correctly. A tool that was never invoked because the
+# agent malformed the call cannot be an answer to anything, so only the second is matched.
+# Measured 2026-08-05, both routes (emitters: tools/tool_search_validation.py and the a2a plugin):
+#   bridge : "tool_call to 'a2a_call' is missing required argument(s): agent, message.
+#             The tool was NOT invoked."
+#   direct : "Error: both 'agent' and 'message' are required."
+_NEVER_INVOKED_MARKERS = (
+    "was not invoked",
+    "missing required argument",
+    "are required",
+    "is required",
+)
+
+
+def _call_was_never_invoked(content: str) -> bool:
+    """True when a tool result says the call was rejected before it ran."""
+    probe = content[:500].lower()
+    return any(m in probe for m in _NEVER_INVOKED_MARKERS)
+
+
+def _every_tool_call_errored(result: dict) -> Optional[str]:
+    """Reason string if this turn's every tool call was rejected before running (AIA-13).
+
+    DETECTOR ONLY -- this decides nothing. run_job logs the result ("did no work") and lets
+    the job stand: the markers were chosen from two observed error strings out of a registry
+    of ~100 tools, and a false positive would fail a job that worked. Promote it to a failure
+    on data from those log lines, not on a guess.
+
+    Only the CURRENT turn is examined -- walk back to the user message that started it, so a
+    prior turn's failure cannot condemn this one. Anything unjudgeable (non-string content
+    from a multimodal or untrusted-wrapped result, an unimportable detector, a tool that
+    genuinely ran and errored) returns None.
+    """
+    turn = []
+    for msg in reversed(result.get("messages") or []):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") == "user":
+            break
+        turn.append(msg)
+
+    tools = [m for m in reversed(turn) if m.get("role") == "tool"]
+    if not tools:
+        return None
+
+    try:
+        from agent.display import _detect_tool_failure
+    except ImportError:
+        return None
+
+    names = []
+    for m in tools:
+        content = m.get("content")
+        if not isinstance(content, str):
+            return None
+        name = str(m.get("tool_name") or m.get("name") or "?")
+        failed, _suffix = _detect_tool_failure(name, content)
+        if not failed or not _call_was_never_invoked(content):
+            return None
+        names.append(name)
+
+    return (
+        f"every tool call in this turn was rejected before it ran "
+        f"({len(tools)} attempted: {', '.join(sorted(set(names)))}) and the agent stopped "
+        f"without a successful call -- the job did no work. A cron run has nobody to "
+        f"re-prompt it.")
+
+
 def _final_response_from_result(result: dict, job_id: str, job_name: str, AIAgent) -> str:
     """Deliverable final response from a ``run_conversation`` result. Raises RuntimeError on
     `failed=True`/`completed=False`: the error text may sit in `final_response` and would otherwise
@@ -2528,6 +2597,15 @@ def run_job(
             agent, prompt, job, job_id, job_name, scope.task_id, cancel_event,
             worker_state=_worker_state)
         final_response = _final_response_from_result(result, job_id, job_name, AIAgent)
+        # AIA-13, observe-only: logged, not failed, while the detector earns trust -- see
+        # _every_tool_call_errored. Grep: "did no work".
+        try:
+            _no_work = _every_tool_call_errored(result)
+        except Exception as _nw_err:  # the check must never fail a run that succeeded
+            logger.warning("Job '%s': no-work check failed: %s", job_id, _nw_err)
+            _no_work = None
+        if _no_work:
+            logger.error("Job '%s' (ID: %s) did no work: %s", job_name, job_id, _no_work)
         if (setup.fallback_notice and final_response.strip() and not _is_cron_silence_response(final_response)
                 and _cron_failure_marker_error(final_response) is None):
             # Pre-agent provider switch (#74349) rides with the delivered report; silence and the
