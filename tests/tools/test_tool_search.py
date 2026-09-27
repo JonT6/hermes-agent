@@ -886,3 +886,173 @@ class TestDeferredCallSchemaProbe:
         }, calls)
 
         assert validate_deferred_call_args(name, {"payload": {"anything": True}}) is None
+
+
+# ---------------------------------------------------------------------------
+# AIA-13: pinned tools are never deferred
+# ---------------------------------------------------------------------------
+
+
+class TestPinnedToolsAreNeverDeferred:
+    """An unattended path must not depend on a three-step discovery dance.
+
+    Measured 2026-08-05: a2a_call sat in the deferred set, so invoking it meant
+    tool_search -> tool_describe -> tool_call with a correctly-wrapped argument
+    object. The model fumbled that wrapper on 3 of 4 unattended cron runs, and
+    on one of them gave up after a single failure while the scheduler still
+    logged "completed successfully". An interactive user re-sends the message;
+    a cron job at 3am does not.
+    """
+
+    def _with_pins(self, monkeypatch, names, defer=None):
+        """Point every config read in tools.tool_search at a config pinning *names*."""
+        import tools.tool_search as ts
+        raw = {'enabled': 'on', 'always_visible': names}
+        if defer is not None:
+            raw['defer'] = defer
+        cfg = ts.ToolSearchConfig.from_raw(raw)
+        monkeypatch.setattr(ts, 'load_config', lambda: cfg)
+        monkeypatch.setattr(ts, 'load_config_readonly', lambda: cfg)
+        return cfg
+
+    def test_config_parses_the_pin_list(self):
+        from tools.tool_search import ToolSearchConfig
+        cfg = ToolSearchConfig.from_raw(
+            {'always_visible': ['a2a_call', 'a2a_result']})
+        assert cfg.always_visible == ('a2a_call', 'a2a_result')
+
+    def test_a_bare_string_counts_as_one_name(self):
+        from tools.tool_search import ToolSearchConfig
+        assert ToolSearchConfig.from_raw(
+            {'always_visible': 'a2a_call'}).always_visible == ('a2a_call',)
+
+    def test_blank_entries_are_dropped(self):
+        from tools.tool_search import ToolSearchConfig
+        assert ToolSearchConfig.from_raw(
+            {'always_visible': ['a2a_call', '', '  ']}).always_visible == ('a2a_call',)
+
+    def test_a_junk_value_pins_nothing_rather_than_raising(self):
+        from tools.tool_search import ToolSearchConfig
+        assert ToolSearchConfig.from_raw(
+            {'always_visible': 17}).always_visible == ()
+
+    def test_nothing_is_pinned_by_default(self):
+        from tools.tool_search import ToolSearchConfig
+        assert ToolSearchConfig.from_raw(None).always_visible == ()
+        assert ToolSearchConfig.from_raw({}).always_visible == ()
+        assert ToolSearchConfig.from_raw(True).always_visible == ()
+
+    def _pretend_registered(self, monkeypatch, name, toolset='a2a'):
+        """Make the registry resolve *name* to a plugin tool.
+
+        Without this the test is vacuous: an unregistered name already returns
+        False from the registry branch, so the pin check is never reached and
+        removing it changes nothing. A mutation run caught exactly that.
+        """
+        from tools.registry import registry
+
+        class _Entry:
+            pass
+        e = _Entry()
+        e.toolset = toolset
+        real = registry.get_entry
+        monkeypatch.setattr(registry, 'get_entry',
+                            lambda n: e if n == name else real(n))
+
+    def test_without_a_pin_the_tool_is_deferrable(self, monkeypatch):
+        from tools.tool_search import is_deferrable_tool_name
+        cfg = self._with_pins(monkeypatch, [])
+        self._pretend_registered(monkeypatch, 'a2a_call')
+        assert is_deferrable_tool_name(
+            'a2a_call', cfg.effective_defer_tools, cfg.always_visible) is True
+
+    def test_a_pinned_tool_is_not_deferrable(self, monkeypatch):
+        from tools.tool_search import is_deferrable_tool_name
+        cfg = self._with_pins(monkeypatch, ['a2a_call'])
+        self._pretend_registered(monkeypatch, 'a2a_call')
+        assert is_deferrable_tool_name(
+            'a2a_call', cfg.effective_defer_tools, cfg.always_visible) is False
+
+    def test_pinning_one_tool_does_not_pin_another(self, monkeypatch):
+        from tools.tool_search import is_deferrable_tool_name
+        cfg = self._with_pins(monkeypatch, ['a2a_call'])
+        self._pretend_registered(monkeypatch, 'other_tool')
+        assert is_deferrable_tool_name(
+            'other_tool', cfg.effective_defer_tools, cfg.always_visible) is True
+
+    def test_a_pin_wins_over_the_defer_list(self, monkeypatch):
+        """Both lists name the tool: the operator's pin is the more specific ask."""
+        from tools.tool_search import is_deferrable_tool_name
+        cfg = self._with_pins(monkeypatch, ['a2a_call'], defer=['a2a_call'])
+        self._pretend_registered(monkeypatch, 'a2a_call')
+        assert 'a2a_call' in cfg.effective_defer_tools
+        assert is_deferrable_tool_name(
+            'a2a_call', cfg.effective_defer_tools, cfg.always_visible) is False
+
+    def test_a_pin_wins_over_the_curated_default_defer_list(self, monkeypatch):
+        from tools.tool_search import _DEFAULT_DEFERRED_TOOLS, is_deferrable_tool_name
+        assert 'todo_list' in _DEFAULT_DEFERRED_TOOLS
+        cfg = self._with_pins(monkeypatch, ['todo_list'])
+        assert is_deferrable_tool_name(
+            'todo_list', cfg.effective_defer_tools, cfg.always_visible) is False
+
+    def test_classify_keeps_a_pinned_tool_visible(self, monkeypatch):
+        from tools.tool_search import classify_tools
+        cfg = self._with_pins(monkeypatch, ['a2a_call'])
+        self._pretend_registered(monkeypatch, 'a2a_call')
+        visible, deferrable = classify_tools(
+            [_td('a2a_call')], cfg.effective_defer_tools, cfg.always_visible)
+        assert [d['function']['name'] for d in visible] == ['a2a_call']
+        assert deferrable == []
+
+    # The pin must hold at every caller that decides deferral, not only in the
+    # helper: assembly (what the model sees), the scoped set the bridge and the
+    # executor unwrap gate on, and tool_call's own resolution.
+
+    def test_assembly_keeps_a_pinned_plugin_tool_resident(self, monkeypatch):
+        from tools.tool_search import assemble_tool_defs
+        cfg = self._with_pins(monkeypatch, ['a2a_call'])
+        self._pretend_registered(monkeypatch, 'a2a_call')
+        self._pretend_registered(monkeypatch, 'a2a_other')
+        result = assemble_tool_defs(
+            [_td('a2a_call', 'Call a peer'), _td('a2a_other', 'Other')],
+            context_length=200_000, config=cfg)
+        names = [t['function']['name'] for t in result.tool_defs]
+        assert 'a2a_call' in names
+        assert 'a2a_other' not in names  # the unpinned sibling still defers
+        assert result.deferred_count == 1
+
+    def test_assembly_honours_a_pin_named_in_defer_too(self, monkeypatch):
+        from tools.tool_search import assemble_tool_defs
+        cfg = self._with_pins(monkeypatch, ['a2a_call'], defer=['a2a_call'])
+        self._pretend_registered(monkeypatch, 'a2a_call')
+        result = assemble_tool_defs(
+            [_td('a2a_call', 'Call a peer')], context_length=200_000, config=cfg)
+        assert 'a2a_call' in [t['function']['name'] for t in result.tool_defs]
+        assert result.deferred_count == 0
+
+    def test_a_pinned_tool_is_outside_the_bridge_scope(self, monkeypatch):
+        from tools.tool_search import scoped_deferrable_names
+        self._with_pins(monkeypatch, ['a2a_call'])
+        self._pretend_registered(monkeypatch, 'a2a_call')
+        self._pretend_registered(monkeypatch, 'a2a_other')
+        names = scoped_deferrable_names([_td('a2a_call'), _td('a2a_other')])
+        assert names == frozenset({'a2a_other'})
+
+    def test_tool_call_on_a_pinned_tool_points_at_the_direct_tool(self, monkeypatch):
+        from tools.tool_search import resolve_underlying_call
+        self._with_pins(monkeypatch, ['a2a_call'])
+        self._pretend_registered(monkeypatch, 'a2a_call')
+        name, _args, err = resolve_underlying_call(
+            {'calls': [{'name': 'a2a_call', 'arguments': {}}]})
+        assert name is None
+        assert 'directly-listed' in err
+
+    def test_tool_describe_on_a_pinned_tool_points_at_the_direct_tool(self, monkeypatch):
+        from tools.tool_search import dispatch_tool_describe
+        self._with_pins(monkeypatch, ['a2a_call'])
+        self._pretend_registered(monkeypatch, 'a2a_call')
+        result = json.loads(dispatch_tool_describe(
+            {'names': ['a2a_call']}, current_tool_defs=[_td('a2a_call')]))
+        assert result['tools'] == {}
+        assert 'directly-listed' in result['errors']['a2a_call']
