@@ -4721,7 +4721,8 @@ class TelegramAdapter(BasePlatformAdapter):
                     await handler(query, data, chat_id)
                 return
         for prefix, handler in (
-            ("gt:", self._handle_gmail_triage_callback), ("ea:", self._handle_exec_approval_callback),
+            ("gt:", self._handle_gmail_triage_callback), ("sd:", self._handle_deals_callback),
+            ("ea:", self._handle_exec_approval_callback),
             ("sc:", self._handle_slash_confirm_callback), ("cl:", self._handle_clarify_callback),
             ("update_prompt:", self._handle_update_prompt_callback)):
             if data.startswith(prefix):
@@ -4974,6 +4975,56 @@ class TelegramAdapter(BasePlatformAdapter):
         # Sticky state verbs keep the keyboard so further actions can stack; one-shots strip it (can't fire twice).
         with contextlib.suppress(Exception):
             await query.edit_message_text(text=appended, **({} if is_state_verb else {"reply_markup": None}))
+
+    _SD_LABELS = {"approved": "✅ Approved", "skipped": "❌ Skipped"}
+
+    async def _handle_deals_callback(self, query, data: str, cb: Dict[str, Any]) -> None:
+        """``sd:<approve|skip>:<id>`` — a secret-deals candidate card button (SEC-71).
+
+        Runs the worker CLI; only the deals plugin's ``allowed_user_id`` may act, and only if the
+        callback allowlist also admits them. A refusal is answered with the worker's own text and
+        the buttons stay; a success strips them and appends the outcome to the card."""
+        from plugins.platforms.telegram import deals_callbacks as _sd
+        parsed = _sd.parse_callback(data)
+        if parsed is None:
+            await query.answer(text="Invalid deals button. Nothing was changed.")
+            return
+        verb, candidate_id = parsed
+        if not await self._callback_authorized(query, cb, _UNAUTHORIZED):
+            return
+        settings = _sd.deals_settings()
+        owner = _sd.owner_id(settings)
+        if not owner:
+            await query.answer(text="Refused: plugins.entries.deals.settings.allowed_user_id is not set, so nobody "
+                                    "may act on candidates. Nothing was changed.", show_alert=True)
+            return
+        if str(getattr(query.from_user, "id", "")).strip() != owner:
+            await query.answer(text=_UNAUTHORIZED)
+            return
+        answer = await _sd.run_worker(verb, candidate_id, settings)
+        logger.info("[%s] deals button: %s %s -> ok=%s %s", self.name, verb, candidate_id, answer.ok, answer.text)
+        if not answer.ok:
+            await query.answer(text=answer.text[:200], show_alert=True)  # Bot API cap: 200 chars
+            return
+        label = self._SD_LABELS.get(answer.text, f"✔ {verb}: {answer.text}")
+        await query.answer(text=label)
+        message = query.message
+        card_html = getattr(message, "text_html", None) if message is not None else None
+        if not isinstance(card_html, str):  # no entities to rebuild: escape the plain text instead
+            card_html = _html.escape((getattr(message, "text", None) or "") if message is not None else "")
+        by = getattr(query.from_user, "first_name", None) or "User"
+        status_line = _html.escape(f"— {label} by {by}")
+        no_preview = ({"link_preview_options": LinkPreviewOptions(is_disabled=True)}
+                      if LinkPreviewOptions is not None else {"disable_web_page_preview": True})
+        try:
+            await query.edit_message_text(
+                text=f"{card_html}\n\n{status_line}", parse_mode=ParseMode.HTML, reply_markup=None, **no_preview)
+        except Exception as exc:  # e.g. the card plus the line passes 4096 chars: still strip the buttons
+            logger.warning("[%s] deals button: card text edit failed (%s); removing buttons only", self.name, exc)
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception as exc2:
+                logger.warning("[%s] deals button: removing buttons failed too: %s", self.name, exc2)
 
     def _missing_media_path_error(self, label: str, path: str) -> str:
         """File-not-found error for MEDIA delivery; /workspace-style paths often exist only in the sandbox."""
