@@ -141,22 +141,35 @@ class MemoryStore:
         self._conn.commit()
         return cur
 
-    def add_fact(self, content: str, category: str = "general", tags: str = "") -> int:
+    def add_fact(self, content: str, category: str = "general", tags: str = "", trust_score: float | None = None) -> int:
         """Insert a fact and return its fact_id; on duplicate content (UNIQUE) return the existing fact_id untouched.
-        Links extracted entities and rebuilds the category bank."""
+        Links extracted entities and rebuilds the category bank. ``trust_score`` defaults to ``default_trust``;
+        untrusted-origin callers pass a score below the prefetch ``min_trust`` floor, keeping the fact searchable
+        on demand but out of automatic recall (AIA-16)."""
         with self._lock:
             content = content.strip()
             if not content:
                 raise ValueError("content must not be empty")
             try:
                 fact_id: int = self._write("INSERT INTO facts (content, category, tags, trust_score) VALUES (?, ?, ?, ?)",
-                                           (content, category, tags, self.default_trust)).lastrowid  # type: ignore[assignment]
+                                           (content, category, tags, self.default_trust if trust_score is None else trust_score)).lastrowid  # type: ignore[assignment]
             except sqlite3.IntegrityError:
                 return int(self._one("SELECT fact_id FROM facts WHERE content = ?", (content,))["fact_id"])
             self._link_entities(fact_id, content)
             self._compute_hrr_vector(fact_id, content)
             self._rebuild_bank(category)
             return fact_id
+
+    def record_retrieval(self, fact_ids: list) -> None:
+        """Increment retrieval_count for facts an explicit fact_store read returned to the model.
+        FactRetriever selects the column but never writes it, so without this it read 0 for every fact whatever
+        the use. Deliberately NOT called by the automatic per-turn prefetch, so it measures deliberate recall."""
+        ids = [i for i in (fact_ids or []) if isinstance(i, int)]
+        if not ids:
+            return
+        with self._lock:
+            self._write(f"UPDATE facts SET retrieval_count = retrieval_count + 1 WHERE fact_id IN ({','.join('?' * len(ids))})",
+                        ids)
 
     def update_fact(self, fact_id: int, content: str | None = None, trust_delta: float | None = None,
                     tags: str | None = None, category: str | None = None) -> bool:

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -20,6 +21,20 @@ from .retrieval import FactRetriever
 from hermes_cli.config import cfg_get
 
 logger = logging.getLogger(__name__)
+
+# Untrusted-origin content (AIA-16). The opening of the envelope the A2A adapter prepends to inbound peer text
+# (source of truth: plugins/platforms/a2a/security.py::PRIVACY_PREFIX) — duplicated rather than imported so the
+# memory plugin keeps no dependency on a platform plugin that may not be installed; the duplication is pinned by
+# test_holographic_untrusted_peer.py, which fails if the two drift apart. Such facts get their own category and a
+# trust score below the ``min_trust_threshold`` floor prefetch() applies (default 0.3): still searchable through
+# an explicit fact_store call, never auto-injected into a prompt.
+_A2A_INBOUND_MARKER = "[A2A inbound —"
+UNTRUSTED_PEER_CATEGORY = "untrusted_peer"
+UNTRUSTED_PEER_TRUST = 0.0
+
+# The per-turn skim shows _PREFETCH_SHOW facts but scans _PREFETCH_SCAN, so the block can state how much it is
+# withholding: a skim that cannot say what it left behind reads as a complete answer, and the agent stops drilling.
+_PREFETCH_SHOW, _PREFETCH_SCAN = 5, 40
 
 # Expanded by initialize() against the profile that opens it. A concrete path is copied by a profile clone
 # and outlives a rename, so it keeps naming the old profile's DB.
@@ -148,27 +163,78 @@ class HolographicMemoryProvider(MemoryProvider):
                                         temporal_decay_half_life=int(self._config.get("temporal_decay_half_life", 0)))
         self._session_id = session_id
 
+    def _recallable_count(self) -> int:
+        """Facts eligible for AUTOMATIC recall (trust >= min_trust). Excludes the AIA-16 quarantine: counting
+        untrusted peer content would advertise it and turn an on-demand escape hatch into an automatic one."""
+        if not self._store:
+            return 0
+        try:
+            return int(self._store._conn.execute("SELECT COUNT(*) FROM facts WHERE trust_score >= ?",
+                                                 (self._min_trust,)).fetchone()[0])
+        except Exception:
+            return 0
+
     def system_prompt_block(self) -> str:
         if not self._store:
             return ""
-        try:
-            total = self._store._conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
-        except Exception:
-            total = 0
-        body = ("Active. Empty fact store — proactively add facts the user would expect you to remember.\n"
-                "Use fact_store(action='add') to store durable structured facts about people, projects, preferences, decisions.\n"
-                if total == 0 else
-                f"Active. {total} facts stored with entity resolution and trust scoring.\n"
-                "Use fact_store to search, probe entities, reason across entities, or add facts.\n")
-        return "# Holographic Memory\n" + body + "Use fact_feedback to rate facts after using them (trains trust scores)."
+        total = self._recallable_count()
+        if total == 0:
+            body = ("Active. Empty fact store — proactively add facts the user would expect you to remember.\n"
+                    "Use fact_store(action='add') to store durable structured facts about people, projects, preferences, decisions.\n"
+                    "Use fact_feedback to rate facts after using them (trains trust scores).")
+        else:
+            # A trigger list, not a capability note: the skim is framed as a sample, so the model drills.
+            body = (f"Active. {total} facts stored, with entity resolution and trust scoring.\n\n"
+                    f"Any `## Holographic Memory` block in a turn is a KEYWORD SKIM of those {total} facts — it is not "
+                    f"the memory itself. It is one full-text match on the user's literal wording, capped at "
+                    f"{_PREFETCH_SHOW} results, and it routinely misses facts that are stored and relevant but phrased "
+                    "differently.\n\n"
+                    "## When to search memory BEFORE answering\n"
+                    "This is a trigger list, not a capability note. If ANY of these hold, call fact_store first:\n"
+                    "- the request names a person, project, ticket, repo, host, or tool\n"
+                    "- it asks what was decided, why, or what happened before\n"
+                    "- it assumes shared history (\"the usual\", \"like last time\", \"ours\")\n"
+                    f"- the skim block is absent, or showed fewer than {_PREFETCH_SHOW} results\n"
+                    "- you are about to say you don't know, don't recall, or have no record\n\n"
+                    "The last one is absolute: never assert absence on the strength of the skim. The skim not showing "
+                    "something is not evidence it isn't stored.\n\n"
+                    "Actions: search (keywords), probe (one entity), related (neighbours), reason (across entities), "
+                    "contradict (conflicts). Rate what you actually used with fact_feedback — trust scores only "
+                    "improve if you do.")
+        return "# Holographic Memory\n" + body
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
+        """The automatic per-turn block, shaped as an INDEX rather than an answer: it says how much it is NOT
+        showing, and a keyword miss still emits a block — returning "" injects nothing, which reads as "memory is
+        empty" rather than "the search missed". Counts cover the recallable set only (see _recallable_count)."""
         if not self._retriever or not query:
             return ""
         try:
-            results = self._retriever.search(query, min_trust=self._min_trust, limit=5)
-            lines = [f"- [{r.get('trust_score', r.get('trust', 0)):.1f}] {r.get('content', '')}" for r in results]
-            return "## Holographic Memory\n" + "\n".join(lines) if results else ""
+            total = self._recallable_count()
+            if not total:
+                return ""
+            matches = self._retriever.search(query, min_trust=self._min_trust, limit=_PREFETCH_SCAN)
+            shown = matches[:_PREFETCH_SHOW]
+            if not shown:
+                return ("## Holographic Memory — skim found NOTHING\n"
+                        f"A keyword search of {total} stored facts matched 0 for this request. That means the KEYWORD "
+                        "SEARCH missed. It does not mean memory is empty, and it is not evidence the fact is absent.\n"
+                        "-> Before saying you don't know or have no record: call fact_store(action='search') with "
+                        "different wording, or fact_store(action='probe') on any name in the request.")
+            out = [f"## Holographic Memory — PARTIAL skim ({len(shown)} shown, drawn from {total} stored facts)"]
+            handles: list[str] = []
+            for r in shown:
+                trust = r.get("trust_score", r.get("trust", 0)) or 0.0
+                out.append(f"- [#{r.get('fact_id', '?')} trust {trust:.2f}] {r.get('content', '')}")
+                handles += [t for t in str(r.get("tags") or "").replace(",", " ").split() if t not in handles]
+            if handles:
+                out.append("Drill handles: " + ", ".join(handles[:8]))
+            withheld = len(matches) - len(shown)
+            out.append("-> One keyword pass, not a recall. "
+                       + (f"At least {withheld} further match(es) exist that are NOT shown. " if withheld > 0 else "")
+                       + "If the answer is not COMPLETE above, call fact_store before answering rather than reasoning "
+                       "from these lines alone.")
+            return "\n".join(out)
         except Exception as e:
             logger.debug("Holographic prefetch failed: %s", e)
             return ""
@@ -211,21 +277,31 @@ class HolographicMemoryProvider(MemoryProvider):
     # Tool handlers (self, args) -> str. KeyError from args[...] / Exception -> tool_error in handle_tool_call;
     # argument coercion order (and therefore which error surfaces first) mirrors the underlying call order.
 
+    def _recalled(self, items: list) -> str:
+        """Serialize a fact_store read and record the returned facts' retrieval_count. Only explicit tool reads
+        pass through here — the per-turn prefetch does not — so the counter measures deliberate recall."""
+        ids = [r["fact_id"] for r in items if isinstance(r, dict) and isinstance(r.get("fact_id"), int)]
+        try:
+            self._store.record_retrieval(ids)
+        except sqlite3.Error as e:  # instrumentation must not fail the read it is counting
+            logger.warning("Holographic record_retrieval failed (read still served): %s", e)
+        return _results(items)
+
     def _entity_query(self, method: str, a: dict) -> str:
         """'probe' / 'related': single-entity retriever queries."""
-        return _results(getattr(self._retriever, method)(a["entity"], category=a.get("category"), limit=_limit(a)))
+        return self._recalled(getattr(self._retriever, method)(a["entity"], category=a.get("category"), limit=_limit(a)))
 
     _TOOL_HANDLERS = {
         "fact_store": _tool_handler({
             "add": lambda self, a: json.dumps({"fact_id": self._store.add_fact(
                 a["content"], category=a.get("category", "general"), tags=a.get("tags", "")), "status": "added"}),
-            "search": lambda self, a: _results(self._retriever.search(
+            "search": lambda self, a: self._recalled(self._retriever.search(
                 a["query"], category=a.get("category"), min_trust=float(a.get("min_trust", self._min_trust)), limit=_limit(a))),
             "probe": lambda self, a: self._entity_query("probe", a),
             "related": lambda self, a: self._entity_query("related", a),
-            "reason": lambda self, a: _results(self._retriever.reason(a["entities"], category=a.get("category"), limit=_limit(a)))
+            "reason": lambda self, a: self._recalled(self._retriever.reason(a["entities"], category=a.get("category"), limit=_limit(a)))
             if a.get("entities") else tool_error("reason requires 'entities' list"),
-            "contradict": lambda self, a: _results(self._retriever.contradict(category=a.get("category"), limit=_limit(a))),
+            "contradict": lambda self, a: self._recalled(self._retriever.contradict(category=a.get("category"), limit=_limit(a))),
             "update": lambda self, a: json.dumps({"updated": self._store.update_fact(
                 int(a["fact_id"]), content=a.get("content"), trust_delta=float(a["trust_delta"]) if "trust_delta" in a else None,
                 tags=a.get("tags"), category=a.get("category"))}),
@@ -252,10 +328,17 @@ class HolographicMemoryProvider(MemoryProvider):
                 continue
             if not isinstance(content, str) or len(content) < 10:
                 continue
+            # role == "user" is not "the operator said this": inbound A2A peer text arrives as a user message, and a
+            # peer's "I want the real tool output" was filed as the operator's preference at default trust, then
+            # served back by prefetch() on later turns (AIA-16). Checked on the segment actually stored (after the
+            # merge split), by substring: a merge can move the envelope off position 0, and mislabelling a genuine
+            # message only lowers its trust, whereas missing a peer message reopens the hole.
+            untrusted = _A2A_INBOUND_MARKER in content
             for patterns, category in _EXTRACT_CATEGORIES:
                 if any(p.search(content) for p in patterns):
                     try:
-                        self._store.add_fact(content[:400], category=category)
+                        self._store.add_fact(content[:400], category=UNTRUSTED_PEER_CATEGORY if untrusted else category,
+                                             trust_score=UNTRUSTED_PEER_TRUST if untrusted else None)
                         extracted += 1
                     except Exception:
                         pass
