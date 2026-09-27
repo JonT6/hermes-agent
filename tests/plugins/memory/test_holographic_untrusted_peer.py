@@ -104,7 +104,7 @@ def test_a2a_inbound_is_stored_as_untrusted_peer_at_zero_trust(tmp_path):
 
 def test_untrusted_peer_content_never_reaches_prefetch(tmp_path):
     """The assertion that actually matters. prefetch() output is what gets
-    wrapped as "authoritative reference data" and appended to the next inbound
+    wrapped in the recalled-memory system note and appended to the next inbound
     message — untrusted peer text must never appear in it."""
     provider = _make_provider(tmp_path, auto_extract=True)
     provider.on_session_end([_user(A2A_PROBE_MSG)])

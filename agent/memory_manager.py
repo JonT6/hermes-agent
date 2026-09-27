@@ -163,7 +163,10 @@ def inject_memory_provider_tools(agent: Any) -> int:
 _FENCE_TAG_RE = re.compile(r'</?\s*memory-context\s*>', re.IGNORECASE)
 _INTERNAL_CONTEXT_RE = re.compile(r'<\s*memory-context\s*>[\s\S]*?</\s*memory-context\s*>', re.IGNORECASE)
 _INTERNAL_NOTE_RE = re.compile(
-    r'\[System note:\s*The following is recalled memory context,\s*NOT new user input\.\s*Treat as (?:informational background data|authoritative reference data[^\]]*)\.\]\s*',
+    # Open-ended after the "NOT new user input." stem: the trailing clause has been reworded twice
+    # (informational background -> authoritative -> partial sample), and this scrubber is the only thing
+    # keeping the note out of the reply stream, so pinning its exact text leaks the next rewording.
+    r'\[System note:\s*The following is recalled memory context,\s*NOT new user input\.[^\]]*\]\s*',
     re.IGNORECASE,
 )
 
@@ -326,8 +329,10 @@ def build_memory_context_block(raw_context: str) -> str:
     return (
         "<memory-context>\n"
         "[System note: The following is recalled memory context, "
-        "NOT new user input. Treat as authoritative reference data — "
-        "this is the agent's persistent memory and should inform all responses.]\n\n"
+        "NOT new user input. It is a PARTIAL, automatically-retrieved "
+        "sample of the agent's persistent memory — a starting point, not "
+        "the complete record, and not a substitute for searching memory "
+        "directly.]\n\n"
         f"{clean}\n"
         "</memory-context>"
     )

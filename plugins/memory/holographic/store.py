@@ -160,6 +160,17 @@ class MemoryStore:
             self._rebuild_bank(category)
             return fact_id
 
+    def record_retrieval(self, fact_ids: list) -> None:
+        """Increment retrieval_count for facts an explicit fact_store read returned to the model.
+        FactRetriever selects the column but never writes it, so without this it read 0 for every fact whatever
+        the use. Deliberately NOT called by the automatic per-turn prefetch, so it measures deliberate recall."""
+        ids = [i for i in (fact_ids or []) if isinstance(i, int)]
+        if not ids:
+            return
+        with self._lock:
+            self._write(f"UPDATE facts SET retrieval_count = retrieval_count + 1 WHERE fact_id IN ({','.join('?' * len(ids))})",
+                        ids)
+
     def update_fact(self, fact_id: int, content: str | None = None, trust_delta: float | None = None,
                     tags: str | None = None, category: str | None = None) -> bool:
         """Partially update a fact (trust clamped to [0, 1]). Returns True if the row existed."""
