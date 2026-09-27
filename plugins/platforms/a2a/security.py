@@ -198,11 +198,23 @@ def is_safe_callback_url(url: str, *, localhost_mode: Optional[bool] = None) -> 
     return True
 
 
-def audit(direction: str, peer: str, task_id: str, summary: str) -> None:
-    """Append an audit record (direction: inbound | outbound | push). Never raises."""
+def audit(direction: str, peer: str, task_id: str, summary: str, outcome: Optional[str] = None) -> None:
+    """Append an audit record (direction: inbound | outbound | push). Never raises.
+
+    ``outcome`` (AIA-19) records what actually HAPPENED to an outbound relay; the record had no field
+    for it, so a row could not be wrong about delivery — it simply never said, and on 2026-08-13 an
+    operator read a row as "delivered" anyway. Values:
+      ``relay.queued``    — the peer's server accepted it (HTTP 200 + task id). NOT delivery: the
+                            incident was a 200 with a real task id that failed seven seconds later.
+      ``relay.delivered`` — the task reached a terminal state. Only a state check writes this, never a 200.
+      ``relay.failed``    — transport never got there (code in ``summary``), or the peer's task failed.
+    Optional so inbound/push callers are untouched: a row without it is outside this taxonomy, not a
+    row claiming success."""
     try:
         from hermes_constants import get_hermes_home
         rec = {"ts": time.time(), "direction": direction, "peer": peer, "task_id": task_id, "summary": (summary or "")[:500]}
+        if outcome:
+            rec["outcome"] = outcome
         get_hermes_home().mkdir(parents=True, exist_ok=True)
         with (get_hermes_home() / "a2a_audit.jsonl").open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")

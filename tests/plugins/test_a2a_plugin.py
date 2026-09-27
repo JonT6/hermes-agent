@@ -470,6 +470,101 @@ class TestClientTools:
         assert "input-required" in out
         assert "ctx-q" in out
 
+    # --- AIA-19: D1 (whose failure is it?) and D2 (what actually happened?) ---------
+
+    def _peer_cfg(self, monkeypatch):
+        monkeypatch.setattr(tools, "_load_config",
+                            lambda: {"a2a_agents": {"leo": {"url": "http://localhost:9999"}}})
+        monkeypatch.setattr(tools, "_http_get_json", lambda url, h, t: None)
+
+    def _audit_rows(self, tmp_path):
+        f = tmp_path / "a2a_audit.jsonl"
+        if not f.exists():
+            return []
+        return [json.loads(l) for l in f.read_text().strip().splitlines() if l.strip()]
+
+    # The literal string from the 2026-08-13 incident.
+    PEER_401 = "Failed to authenticate. API Error: 401 OAuth access token has been revoked."
+
+    def test_failed_peer_task_is_attributed_to_the_peer_not_to_us(self, monkeypatch):
+        """D1. The peer's own error must never read as ours.
+
+        On 2026-08-13 this exact artifact came back under a bare `[leo · … · failed]`
+        header and an operator read the peer's dead credential as a problem with our
+        bearer — ~30 minutes spent checking a token that was working the whole time.
+        Everything up to the failure had SUCCEEDED: request delivered, auth accepted,
+        task created. Only the peer's own processing failed."""
+        self._peer_cfg(monkeypatch)
+        monkeypatch.setattr(tools, "_http_post_json", lambda url, body, h, t:
+                            protocol.jsonrpc_result(body["id"], protocol.build_task(
+                                "t1", "ctx-f", protocol.STATE_FAILED, self.PEER_401)))
+        out = tools.a2a_call({"agent": "leo", "message": "go"})
+        assert self.PEER_401 in out                      # the peer's text, verbatim
+        assert "PEER's failure, not ours" in out         # …and unmistakably attributed
+        # Must NOT borrow the vocabulary of OUR OWN auth failure — that collision is D1.
+        assert "Check the configured token" not in out
+
+    def test_our_own_auth_failure_still_reads_as_ours(self, monkeypatch):
+        """The other side of D1, and the reason the fix is a distinction rather than a
+        rewording: a genuine Cawl-side 401 must keep pointing at our config. If both
+        cases say 'look at the peer', the ambiguity has just been moved."""
+        self._peer_cfg(monkeypatch)
+
+        def boom(url, body, h, t):
+            raise urllib.error.HTTPError(url, 401, "Unauthorized", {}, None)
+
+        monkeypatch.setattr(tools, "_http_post_json", boom)
+        out = tools.a2a_call({"agent": "leo", "message": "go"})
+        assert "rejected auth" in out and "Check the configured token" in out
+        assert "PEER's failure" not in out
+
+    def test_a_message_that_never_left_is_not_audited_as_sent(self, monkeypatch, tmp_path):
+        """D2. The audit log is the source of truth for 'did this get out'.
+
+        The audit write used to run BEFORE the POST, so a message killed by a wrong
+        bearer still wrote an `outbound` row. The log did not merely omit the failure —
+        it asserted a send that never happened."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        self._peer_cfg(monkeypatch)
+
+        def boom(url, body, h, t):
+            raise urllib.error.HTTPError(url, 401, "Unauthorized", {}, None)
+
+        monkeypatch.setattr(tools, "_http_post_json", boom)
+        tools.a2a_call({"agent": "leo", "message": "go"})
+        outcomes = [r.get("outcome") for r in self._audit_rows(tmp_path)]
+        assert "relay.queued" not in outcomes, "claimed a send that never reached the wire"
+        assert outcomes == ["relay.failed"]
+
+    def test_http_200_is_queued_and_only_a_terminal_state_is_delivered(self, monkeypatch, tmp_path):
+        """D2 + F4. HTTP 200 means the peer's SERVER accepted it, not that the peer DID it.
+
+        Auditing 'sent' at 200 would swap a lie about transmission for a quieter lie
+        about delivery — the incident was a 200 with a real task id whose task failed
+        seven seconds later. Acceptance and completion are two rows, in that order."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        self._peer_cfg(monkeypatch)
+        monkeypatch.setattr(tools, "_http_post_json", lambda url, body, h, t:
+                            protocol.jsonrpc_result(body["id"], protocol.build_task(
+                                "t2", "ctx-ok", protocol.STATE_COMPLETED, "done")))
+        tools.a2a_call({"agent": "leo", "message": "go"})
+        outcomes = [r.get("outcome") for r in self._audit_rows(tmp_path)]
+        assert outcomes == ["relay.queued", "relay.delivered"]
+
+    def test_a_task_that_failed_is_never_audited_as_delivered(self, monkeypatch, tmp_path):
+        """The row that would have prevented the incident. Transport succeeded perfectly
+        and the task still failed; 'delivered' here would be false in the exact way that
+        cost 30 minutes."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        self._peer_cfg(monkeypatch)
+        monkeypatch.setattr(tools, "_http_post_json", lambda url, body, h, t:
+                            protocol.jsonrpc_result(body["id"], protocol.build_task(
+                                "t3", "ctx-x", protocol.STATE_FAILED, self.PEER_401)))
+        tools.a2a_call({"agent": "leo", "message": "go"})
+        outcomes = [r.get("outcome") for r in self._audit_rows(tmp_path)]
+        assert outcomes == ["relay.queued", "relay.failed"]
+        assert "relay.delivered" not in outcomes
+
     def test_rpc_url_prefers_supported_interfaces(self):
         card = {
             "url": "http://legacy:1/",
@@ -1673,3 +1768,164 @@ def test_load_conversation_skips_non_dict_lines(monkeypatch, tmp_path):
         f.write("42\n")
     convo = protocol.load_conversation("ctx-mixed")
     assert len(convo) == 1 and convo[0]["text"] == "hello"
+
+
+class TestCallCollectsResult:
+    """AIA-12: a2a_call must return the peer's ANSWER, not its acknowledgement.
+
+    Measured against the live Leo endpoint 2026-08-05:
+
+        16:05:23.748  task created      <- the single SendMessage POST
+        16:05:23.750  a2a_call RETURNS  <- 2 ms later, state still `working`
+        16:05:45.348  task COMPLETED    <- 21.6 s later, holding the answer
+                      (nothing ever fetched it)
+
+    `_send_task` sent one message and returned whatever came back. Peers that
+    return immediately in `working` — which is the *correct* design for a task
+    that takes minutes, and exactly what leo-a2a documents — therefore never
+    delivered a result at all. Every signal looked healthy: tool available,
+    auth accepted, task created, task completed. It read as "stuck", not
+    "broken", which is why it survived a full relocation unnoticed.
+    """
+
+    PEER = {"a2a_agents": {"r": {"url": "http://localhost:9999", "poll_timeout": 30}}}
+
+    def _no_card(self, monkeypatch):
+        monkeypatch.setattr(tools, "_load_config", lambda: self.PEER)
+        monkeypatch.setattr(tools, "_http_get_json", lambda url, h, t: None)
+        monkeypatch.setattr(tools, "_POLL_INTERVAL_S", 0)
+
+    def test_polls_until_terminal_and_returns_the_answer(self, monkeypatch):
+        self._no_card(monkeypatch)
+        calls = []
+
+        def fake_post(url, body, headers, timeout):
+            calls.append(body["method"])
+            if body["method"] == "SendMessage":
+                return protocol.jsonrpc_result(body["id"], protocol.build_task(
+                    "t-1", "c-1", protocol.STATE_WORKING, ""))
+            # GetTask — first still working, then done.
+            if calls.count("GetTask") < 2:
+                return protocol.jsonrpc_result(body["id"], protocol.build_task(
+                    "t-1", "c-1", protocol.STATE_WORKING, ""))
+            return protocol.jsonrpc_result(body["id"], protocol.build_task(
+                "t-1", "c-1", protocol.STATE_COMPLETED, "THE-ACTUAL-ANSWER"))
+
+        monkeypatch.setattr(tools, "_http_post_json", fake_post)
+        out = tools.a2a_call({"agent": "r", "message": "do the thing"})
+
+        assert "THE-ACTUAL-ANSWER" in out, "the caller must receive the peer's answer"
+        assert "GetTask" in calls, "must poll rather than fire and forget"
+        assert "completed" in out
+
+    def test_does_not_poll_when_the_first_response_is_already_terminal(self, monkeypatch):
+        """A peer that answers synchronously must not cost an extra round trip."""
+        self._no_card(monkeypatch)
+        calls = []
+
+        def fake_post(url, body, headers, timeout):
+            calls.append(body["method"])
+            return protocol.jsonrpc_result(body["id"], protocol.build_task(
+                "t-2", "c-2", protocol.STATE_COMPLETED, "immediate answer"))
+
+        monkeypatch.setattr(tools, "_http_post_json", fake_post)
+        out = tools.a2a_call({"agent": "r", "message": "quick one"})
+        assert "immediate answer" in out
+        assert calls == ["SendMessage"], f"expected no polling, got {calls}"
+
+    def test_budget_exhaustion_is_loud_and_actionable(self, monkeypatch):
+        """Never a silent empty reply — the old failure returned '(no text reply)'.
+
+        The caller must be told it is still running AND be able to collect it
+        later, so the task id has to survive into the message.
+        """
+        monkeypatch.setattr(tools, "_load_config", lambda: {
+            "a2a_agents": {"r": {"url": "http://localhost:9999", "poll_timeout": 0.001}}})
+        monkeypatch.setattr(tools, "_http_get_json", lambda url, h, t: None)
+        monkeypatch.setattr(tools, "_POLL_INTERVAL_S", 0)
+
+        def fake_post(url, body, headers, timeout):
+            return protocol.jsonrpc_result(body["id"], protocol.build_task(
+                "t-slow", "c-slow", protocol.STATE_WORKING, ""))
+
+        monkeypatch.setattr(tools, "_http_post_json", fake_post)
+        out = tools.a2a_call({"agent": "r", "message": "long triage"})
+
+        assert "t-slow" in out, "must name the task id so the result can be collected"
+        assert "a2a_result" in out, "must say how to collect it"
+        assert "no text reply" not in out, "the silent-empty-reply failure must not return"
+        assert "still" in out.lower() or "running" in out.lower()
+
+    def test_input_required_stops_polling_immediately(self, monkeypatch):
+        """INPUT_REQUIRED is terminal FOR THE CALLER — waiting on it would hang."""
+        self._no_card(monkeypatch)
+        calls = []
+
+        def fake_post(url, body, headers, timeout):
+            calls.append(body["method"])
+            return protocol.jsonrpc_result(body["id"], protocol.build_task(
+                "t-3", "ctx-q", protocol.STATE_INPUT_REQUIRED, "Which repo?"))
+
+        monkeypatch.setattr(tools, "_http_post_json", fake_post)
+        out = tools.a2a_call({"agent": "r", "message": "review"})
+        assert "Which repo?" in out
+        assert "input-required" in out
+        assert calls == ["SendMessage"]
+
+    def test_auth_required_stops_polling_immediately(self, monkeypatch):
+        """AUTH_REQUIRED is terminal FOR THE CALLER too, and upstream's
+        ``protocol.TERMINAL_STATES`` omits it — so the poll loop must not use that
+        set, or it would spin to the budget on input only the caller can supply."""
+        self._no_card(monkeypatch)
+        calls = []
+
+        def fake_post(url, body, headers, timeout):
+            calls.append(body["method"])
+            return protocol.jsonrpc_result(body["id"], protocol.build_task(
+                "t-4", "ctx-a", "TASK_STATE_AUTH_REQUIRED", "Sign in first."))
+
+        monkeypatch.setattr(tools, "_http_post_json", fake_post)
+        out = tools.a2a_call({"agent": "r", "message": "review"})
+        assert "Sign in first." in out
+        assert "auth-required" in out
+        assert calls == ["SendMessage"]
+
+    def test_poll_timeout_is_read_from_config_on_every_resolve_path(self):
+        """The Mini's config.yaml may set ``a2a_agents.*.poll_timeout``; both the
+        a2a_call path (_resolve_peer) and the orchestrate path (_peer_from_entry)
+        must honour it, and fall back to the default when it is absent."""
+        entry = {"url": "http://localhost:9999", "poll_timeout": 45}
+        assert tools._peer_from_entry(entry)["poll_timeout"] == 45
+        assert tools._peer_from_entry({"url": "http://x"})["poll_timeout"] == tools._DEFAULT_POLL_TIMEOUT_S
+        assert tools._resolve_peer("http://x")["poll_timeout"] == tools._DEFAULT_POLL_TIMEOUT_S
+
+    def test_a2a_result_collects_a_task_by_id(self, monkeypatch):
+        """The escape hatch for a task that outlived the budget."""
+        self._no_card(monkeypatch)
+
+        def fake_post(url, body, headers, timeout):
+            assert body["method"] == "GetTask"
+            assert body["params"]["id"] == "t-slow"
+            return protocol.jsonrpc_result(body["id"], protocol.build_task(
+                "t-slow", "c-slow", protocol.STATE_COMPLETED, "LATE-ANSWER"))
+
+        monkeypatch.setattr(tools, "_http_post_json", fake_post)
+        out = tools.a2a_result({"agent": "r", "task_id": "t-slow"})
+        assert "LATE-ANSWER" in out
+
+    def test_a2a_result_requires_its_args(self):
+        assert "required" in tools.a2a_result({"agent": "", "task_id": "x"})
+        assert "required" in tools.a2a_result({"agent": "r", "task_id": ""})
+
+    def test_a2a_result_is_registered_as_a_tool(self):
+        """Registration goes through the ``_TOOLS`` table, so an entry there is what
+        makes the tool reachable — and it must carry the same config gate."""
+        assert tools._TOOLS["a2a_result"][0] is tools.a2a_result
+        seen = {}
+
+        class _Ctx:
+            def register_tool(self, name, **kw):
+                seen[name] = kw.get("check_fn")
+
+        tools.register_tools(_Ctx())
+        assert seen.get("a2a_result") is tools._a2a_tools_available

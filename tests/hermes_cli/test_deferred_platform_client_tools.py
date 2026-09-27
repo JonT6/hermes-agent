@@ -30,6 +30,7 @@ A2A_CLIENT_TOOLS = {
     "a2a_history",
     "a2a_list",
     "a2a_orchestrate",
+    "a2a_result",
 }
 
 
