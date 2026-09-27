@@ -21,6 +21,16 @@ from hermes_cli.config import cfg_get
 
 logger = logging.getLogger(__name__)
 
+# Untrusted-origin content (AIA-16). The opening of the envelope the A2A adapter prepends to inbound peer text
+# (source of truth: plugins/platforms/a2a/security.py::PRIVACY_PREFIX) — duplicated rather than imported so the
+# memory plugin keeps no dependency on a platform plugin that may not be installed; the duplication is pinned by
+# test_holographic_untrusted_peer.py, which fails if the two drift apart. Such facts get their own category and a
+# trust score below the ``min_trust_threshold`` floor prefetch() applies (default 0.3): still searchable through
+# an explicit fact_store call, never auto-injected into a prompt.
+_A2A_INBOUND_MARKER = "[A2A inbound —"
+UNTRUSTED_PEER_CATEGORY = "untrusted_peer"
+UNTRUSTED_PEER_TRUST = 0.0
+
 # Expanded by initialize() against the profile that opens it. A concrete path is copied by a profile clone
 # and outlives a rename, so it keeps naming the old profile's DB.
 _DEFAULT_DB_PATH = "$HERMES_HOME/memory_store.db"
@@ -252,10 +262,17 @@ class HolographicMemoryProvider(MemoryProvider):
                 continue
             if not isinstance(content, str) or len(content) < 10:
                 continue
+            # role == "user" is not "the operator said this": inbound A2A peer text arrives as a user message, and a
+            # peer's "I want the real tool output" was filed as the operator's preference at default trust, then
+            # served back by prefetch() on later turns (AIA-16). Checked on the segment actually stored (after the
+            # merge split), by substring: a merge can move the envelope off position 0, and mislabelling a genuine
+            # message only lowers its trust, whereas missing a peer message reopens the hole.
+            untrusted = _A2A_INBOUND_MARKER in content
             for patterns, category in _EXTRACT_CATEGORIES:
                 if any(p.search(content) for p in patterns):
                     try:
-                        self._store.add_fact(content[:400], category=category)
+                        self._store.add_fact(content[:400], category=UNTRUSTED_PEER_CATEGORY if untrusted else category,
+                                             trust_score=UNTRUSTED_PEER_TRUST if untrusted else None)
                         extracted += 1
                     except Exception:
                         pass

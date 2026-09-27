@@ -141,16 +141,18 @@ class MemoryStore:
         self._conn.commit()
         return cur
 
-    def add_fact(self, content: str, category: str = "general", tags: str = "") -> int:
+    def add_fact(self, content: str, category: str = "general", tags: str = "", trust_score: float | None = None) -> int:
         """Insert a fact and return its fact_id; on duplicate content (UNIQUE) return the existing fact_id untouched.
-        Links extracted entities and rebuilds the category bank."""
+        Links extracted entities and rebuilds the category bank. ``trust_score`` defaults to ``default_trust``;
+        untrusted-origin callers pass a score below the prefetch ``min_trust`` floor, keeping the fact searchable
+        on demand but out of automatic recall (AIA-16)."""
         with self._lock:
             content = content.strip()
             if not content:
                 raise ValueError("content must not be empty")
             try:
                 fact_id: int = self._write("INSERT INTO facts (content, category, tags, trust_score) VALUES (?, ?, ?, ?)",
-                                           (content, category, tags, self.default_trust)).lastrowid  # type: ignore[assignment]
+                                           (content, category, tags, self.default_trust if trust_score is None else trust_score)).lastrowid  # type: ignore[assignment]
             except sqlite3.IntegrityError:
                 return int(self._one("SELECT fact_id FROM facts WHERE content = ?", (content,))["fact_id"])
             self._link_entities(fact_id, content)
