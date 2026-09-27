@@ -25,16 +25,20 @@ a2a_agents:
   researcher:
     url: "http://localhost:9999"
     auth: { type: bearer, token: "sk-..." }
-    timeout: 120
+    timeout: 120          # per HTTP request
+    poll_timeout: 300     # how long a2a_call waits for the peer to finish
     capabilities: [web_search, research]
 ```
 
 ## Outbound — call other agents
 
-The agent gets five tools:
+The agent gets six tools:
 
 - `a2a_discover(url)` — what can this agent do?
 - `a2a_call(agent, message, context_id?)` — send it a task, get the reply.
+  Waits for the peer to finish (polling `GetTask`) up to the peer's
+  `poll_timeout` (default 300s); past that it returns the task id instead.
+- `a2a_result(agent, task_id)` — collect a task that outlived `poll_timeout`.
 - `a2a_list()` — configured peers, saved conversations, metrics.
 - `a2a_history(context_id)` — recall a saved A2A conversation.
 - `a2a_orchestrate(capability, message, mode?)` — fan-out a task to every
@@ -65,7 +69,9 @@ via `tasks/get`.
   cannot invoke operator slash commands.
 - Outbound text is scrubbed of credential-shaped strings.
 - Push callbacks are SSRF-guarded and HMAC-SHA256 signed (`X-A2A-Signature`).
-- Every exchange is logged to `~/.hermes/a2a_audit.jsonl`.
+- Every exchange is logged to `~/.hermes/a2a_audit.jsonl`. Outbound rows carry
+  an `outcome`: `relay.queued` (peer accepted it), then `relay.delivered` or
+  `relay.failed` (terminal state, or transport that never landed).
 - Conversations persist to `~/.hermes/a2a_conversations/` — they survive context
   compaction and restarts (`a2a_history` recalls them).
 
