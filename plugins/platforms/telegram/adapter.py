@@ -4982,8 +4982,9 @@ class TelegramAdapter(BasePlatformAdapter):
         """``sd:<approve|skip>:<id>`` — a secret-deals candidate card button (SEC-71).
 
         Runs the worker CLI; only the deals plugin's ``allowed_user_id`` may act, and only if the
-        callback allowlist also admits them. A refusal is answered with the worker's own text and
-        the buttons stay; a success strips them and appends the outcome to the card."""
+        callback allowlist also admits them. SEC-44: an approval names the card the button is on
+        (``--card``), so a tap on an out-of-date card is refused. A refusal is answered with the
+        worker's text and the buttons stay; a success strips them and appends the outcome to the card."""
         from plugins.platforms.telegram import deals_callbacks as _sd
         parsed = _sd.parse_callback(data)
         if parsed is None:
@@ -5001,7 +5002,12 @@ class TelegramAdapter(BasePlatformAdapter):
         if str(getattr(query.from_user, "id", "")).strip() != owner:
             await query.answer(text=_UNAUTHORIZED)
             return
-        answer = await _sd.run_worker(verb, candidate_id, settings)
+        card = getattr(query.message, "message_id", None) if verb == "approve" else None
+        if verb == "approve" and (not isinstance(card, int) or isinstance(card, bool)):
+            await query.answer(text="Cannot tell which card this button is on, so the approval cannot be bound to "
+                                    "it. Nothing was changed.", show_alert=True)
+            return
+        answer = await _sd.run_worker(verb, candidate_id, settings, card=card)
         logger.info("[%s] deals button: %s %s -> ok=%s %s", self.name, verb, candidate_id, answer.ok, answer.text)
         if not answer.ok:
             await query.answer(text=answer.text[:200], show_alert=True)  # Bot API cap: 200 chars

@@ -25,6 +25,15 @@ not this plugin) read the same `plugins.entries.deals.settings`: the same worker
 - **`deals_post_now` needs SEC-46 and `deals_get_posts` needs SEC-48 on the worker.** Without
   them argparse rejects `post-now` / `posts`, and the tool answers the same way. Check with
   `.venv/bin/secret-deals post-now --help` and `.venv/bin/secret-deals posts --help`.
+- **SEC-44 (an approval bound to its card) needs the worker's `--card` first.** `deals_approve`,
+  `deals_post_now` and the ✅ Approve button always pass `--card=<message id>`; a tool call whose turn
+  answers no card is refused and never reaches the worker (Jonathan, 2026-09-28: every approval
+  through Cawl is tied to a card). A worker without SEC-44 rejects the flag (no JSON, "The worker gave no answer"). Check
+  with `.venv/bin/secret-deals approve --help | grep -- --card`. It also needs this checkout's
+  gateway (`HERMES_SESSION_REPLY_TO_MESSAGE_ID`, bound in `gateway/run_turn.py`) **and** this
+  plugin copy, deployed together. A SEC-44 plugin on an older gateway refuses every approval
+  ("The gateway does not say which message this answers"). An older user-dir
+  plugin on a SEC-44 gateway passes no card from a text reply, so that route stays unbound.
 - **The tools run `<venv>/bin/secret-deals`**, the sibling of `worker_python`, with `worker_dir`
   as the cwd and a bare environment (PATH, HOME, LANG, LC_ALL, TMPDIR, TZ). This is the same way
   the launchd jobs run. `python -m secret_deals` does not work, because the package has no `__main__`.
