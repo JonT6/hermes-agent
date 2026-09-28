@@ -1,4 +1,4 @@
-"""Real Git local-work safety: caller divergence, restore faults and rescue retention."""
+"""Real Git local-work safety: caller divergence refusal, restore faults and rescue retention."""
 import contextlib
 from pathlib import Path
 import subprocess
@@ -10,15 +10,17 @@ from hermes_cli import main as hermes_main, update_cmd
 from tests.hermes_cli.test_update_target_identity import git, update_tree  # noqa: F401
 
 
-@pytest.mark.parametrize('history,failure,keep', [
-    ('ordinary', None, False), ('ordinary', None, True),
-    ('ordinary', 'reset', False), ('ordinary', 'reset', True),
-    ('orphan', None, False), ('orphan', 'reset', False),
-    ('orphan', 'ref', False), ('orphan', 'head', False),
+@pytest.mark.parametrize('history,keep', [
+    ('ordinary', False), ('ordinary', True), ('orphan', False),
 ])
-def test_update_preserves_local_work_and_rescues_orphan_before_reset(
-    update_tree, monkeypatch, capsys, history, failure, keep,
+def test_update_refuses_when_main_carries_local_commits(
+    update_tree, monkeypatch, capsys, history, keep,
 ):
+    """AIA-47: local commits on the target branch make the update refuse, never reset.
+
+    Covers both divergence shapes (a shared ancestor, and none) through the real
+    ``cmd_update``: no reset, no rescue ref, HEAD kept, the autostash back in the tree.
+    """
     t = update_tree
     git(t.clone, 'checkout', '-q', 'main')
     if history == 'orphan':
@@ -36,49 +38,24 @@ def test_update_preserves_local_work_and_rescues_orphan_before_reset(
     original = subprocess.run
     resets = []
 
-    def fault(command, *args, **kwargs):
+    def record(command, *args, **kwargs):
         if 'reset' in command and '--hard' in command:
-            refs = original(['git', 'for-each-ref', '--format=%(objectname)',
-                             'refs/hermes-update-backups/'], cwd=t.clone,
-                            check=True, capture_output=True, text=True).stdout.split()
-            assert refs == ([before] if failure not in {'ref', 'head'} else [])
             resets.append(command)
-        if ((failure == 'ref' and 'update-ref' in command and '-d' not in command)
-                or (failure == 'reset' and 'reset' in command and '--hard' in command)):
-            return subprocess.CompletedProcess(command, 128, stdout='', stderr='fixture I/O refusal')
         return original(command, *args, **kwargs)
 
-    monkeypatch.setattr(subprocess, 'run', fault)
-    if failure == 'head':
-        monkeypatch.setattr(update_cmd, '_capture_head_sha', lambda *_: None)
-    if failure == 'reset':
-        with pytest.raises(SystemExit) as error:
-            hermes_main.cmd_update(t.args)
-        assert error.value.code == 1
-        assert not t.requests
-        assert git(t.clone, 'rev-parse', 'HEAD') == before
-        assert not (t.clone / 'untracked.txt').exists()
-    else:
+    monkeypatch.setattr(subprocess, 'run', record)
+    with pytest.raises(SystemExit) as error:
         hermes_main.cmd_update(t.args)
-        assert len(t.requests) == 1
-        assert git(t.clone, 'rev-parse', 'HEAD') == t.newer
-        assert (t.clone / 'untracked.txt').exists() is (not keep)
-    assert len(resets) == 1
-    stashes = git(t.clone, 'stash', 'list')
-    assert bool(stashes) is (keep or failure == 'reset')
-    if stashes:
-        assert git(t.clone, 'show', 'stash@{0}^3:untracked.txt') == 'local edit'
+    assert error.value.code == 1
+    assert not t.requests
+    assert resets == []
+    assert git(t.clone, 'rev-parse', 'HEAD') == before
+    assert git(t.clone, 'for-each-ref', 'refs/hermes-update-backups/') == ''
+    assert (t.clone / 'untracked.txt').read_text(encoding='utf-8') == 'local edit\n'
+    assert git(t.clone, 'stash', 'list') == ''
     output = capsys.readouterr().out
-    if failure == 'ref':
-        assert 'backup write failed' in output and 'backed up current HEAD' not in output
-    if failure == 'reset':
-        assert 'preserved in stash' in output
-    if failure not in {'ref', 'head'}:
-        assert f'expires after {update_cmd._ORPHAN_RESCUE_REF_MAX_AGE_DAYS} days' in output
-        kind = 'orphan' if history == 'orphan' else 'diverged'
-        assert f'refs/hermes-update-backups/{kind}-main-' in output
-        if kind == 'diverged':
-            assert 'commit(s) not on origin/main leave the branch' in output
+    assert 'Update refused: main carries 1 commit(s) that are not on origin/main' in output
+    assert 'preserved in stash' not in output
 
 
 @pytest.mark.parametrize('mode', ['count', 'age', 'unparseable'])
