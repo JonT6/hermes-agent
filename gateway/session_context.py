@@ -31,12 +31,15 @@ def session_context_engaged() -> bool:
 #   durable key is not consumed by the wrong poller.
 # * MESSAGE_ID: reply anchor keeping notifications inside the originating Telegram topic.
 # * CRON_SESSION: tri-state — _UNSET = legacy env fallback; "1" = cron; "" = non-cron, masks env.
+# * REPLY_TO_MESSAGE_ID: the message the inbound one replies to (SEC-44: the secret-deals plugin binds an
+#   approval to the card it answers). Bound per turn by ``set_session_reply_to``; "" = not a reply.
 _SESSION_VARS = (
     _SESSION_PLATFORM, _SESSION_SOURCE, _SESSION_CHAT_ID, _SESSION_CHAT_TYPE,
     _SESSION_CHAT_NAME, _SESSION_THREAD_ID, _SESSION_USER_ID, _SESSION_USER_ID_ALT,
     _SESSION_USER_NAME, _SESSION_SCOPE_ID, _SESSION_KEY, _SESSION_ID,
     _SESSION_UI_SESSION_ID, _SESSION_MESSAGE_ID, _SESSION_PROFILE,
     _BROWSER_CONTROL_PRINCIPAL, _BROWSER_CONTROL_TRANSPORT_FAMILY, _CRON_SESSION, _SESSION_PARENT_CHAT_ID,
+    _SESSION_REPLY_TO_MESSAGE_ID,
 ) = tuple(ContextVar(name, default=_UNSET) for name in (
     "HERMES_SESSION_PLATFORM", "HERMES_SESSION_SOURCE", "HERMES_SESSION_CHAT_ID",
     "HERMES_SESSION_CHAT_TYPE", "HERMES_SESSION_CHAT_NAME", "HERMES_SESSION_THREAD_ID",
@@ -44,7 +47,7 @@ _SESSION_VARS = (
     "HERMES_SESSION_SCOPE_ID", "HERMES_SESSION_KEY", "HERMES_SESSION_ID",
     "HERMES_UI_SESSION_ID", "HERMES_SESSION_MESSAGE_ID", "HERMES_SESSION_PROFILE",
     "HERMES_BROWSER_CONTROL_PRINCIPAL", "HERMES_BROWSER_CONTROL_TRANSPORT_FAMILY",
-    "HERMES_CRON_SESSION", "HERMES_SESSION_PARENT_CHAT_ID",
+    "HERMES_CRON_SESSION", "HERMES_SESSION_PARENT_CHAT_ID", "HERMES_SESSION_REPLY_TO_MESSAGE_ID",
 ))
 
 # Whether this channel can route an ASYNC completion back AFTER the turn ends (see
@@ -119,7 +122,7 @@ def set_session_vars(
     message_id: str = "", profile: str = "", browser_control_principal: str = "",
     browser_control_transport_family: str = "", cwd: str = "", async_delivery: bool = True,
     ui_session_id: str = "", cron_session: Any = _UNSET, parent_chat_id: str = "",
-    session_history_delivery: str | None = None,
+    session_history_delivery: str | None = None, reply_to_message_id: str = "",
 ) -> list:
     """Set all session context variables and return reset tokens.  Call
     ``clear_session_vars(tokens)`` in a ``finally``; not nestable, clearing resets every var
@@ -136,12 +139,20 @@ def set_session_vars(
         platform, source, chat_id, chat_type, chat_name, thread_id, user_id, user_id_alt,
         user_name, scope_id, session_key, session_id, ui_session_id, message_id, profile,
         browser_control_principal, browser_control_transport_family, cron_session, parent_chat_id,
+        reply_to_message_id,
     )
-    tokens = [var.set(value) for var, value in zip(_SESSION_VARS, values)]
+    tokens = [var.set(value) for var, value in zip(_SESSION_VARS, values, strict=True)]
     tokens.append(_SESSION_ASYNC_DELIVERY.set(bool(async_delivery)))
     tokens.append(_SESSION_HISTORY_DELIVERY.set(_UNSET if session_history_delivery is None else session_history_delivery))
     _runtime_cwd("set_session_cwd", cwd)
     return tokens
+
+
+def set_session_reply_to(message_id: Any) -> None:
+    """Bind the message this turn's inbound message replies to (``""`` when it is not a reply). Called
+    right after ``_set_session_env`` by the agent-turn path, which has the event; cleared with the rest
+    by ``clear_session_vars``. Tools read it from ``_VAR_MAP`` only, never the ``os.environ`` fallback."""
+    _SESSION_REPLY_TO_MESSAGE_ID.set("" if message_id is None or message_id == "" else str(message_id))
 
 
 def clear_session_vars(tokens: list) -> None:

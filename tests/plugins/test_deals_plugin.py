@@ -61,8 +61,8 @@ def as_user():
     """Bind a gateway turn identity for the test body, then leave no binding behind."""
     tokens = []
 
-    def bind(platform, user_id):
-        tokens.append(set_session_vars(platform=platform, user_id=user_id))
+    def bind(platform, user_id, **more):
+        tokens.append(set_session_vars(platform=platform, user_id=user_id, **more))
 
     yield bind
     for t in tokens:
@@ -122,6 +122,74 @@ def test_each_tool_runs_the_worker_console_script_with_json(as_user, tool, args,
     assert kwargs["cwd"] == WORKDIR
     assert kwargs["timeout"] == {"deals_edit": 180, "deals_post_now": 300, "deals_get_posts": 300}.get(tool, 30)
     assert kwargs["capture_output"] is True
+
+
+# --- SEC-44: an approval is bound to the card it answers ---------------------------------------
+
+
+@pytest.mark.parametrize("tool,args,argv", [
+    ("deals_approve", {"id": 41}, ["approve", "41", "--card=4321"]),
+    ("deals_approve", {"id": 41, "note": "ok"}, ["approve", "41", "--note=ok", "--card=4321"]),
+    ("deals_post_now", {"id": 41}, ["post-now", "41", "--card=4321"]),
+    ("deals_skip", {"id": 41}, ["skip", "41"]),  # only an approval is bound to a card
+    ("deals_edit", {"id": 41, "note": "x"}, ["edit", "41", "--note=x"]),
+])
+def test_a_reply_binds_an_approval_to_the_message_it_answers(as_user, tool, args, argv):
+    as_user("telegram", JONATHAN, thread_id="17", reply_to_message_id="4321")
+    run = FakeRun({"ok": True})
+    _tools(run)[tool](args)
+    assert run.calls[0][0][1:-1] == argv
+
+
+@pytest.mark.parametrize("reply_to", ["", "17"])  # not a reply; the forum topic's root (Telegram sets it)
+def test_no_reply_means_no_card(as_user, reply_to):
+    as_user("telegram", JONATHAN, thread_id="17", reply_to_message_id=reply_to)
+    run = FakeRun({"ok": True})
+    _tools(run)["deals_approve"]({"id": 41})
+    assert run.calls[0][0][1:-1] == ["approve", "41"]
+
+
+def test_the_model_cannot_name_the_card(as_user):
+    as_user("telegram", JONATHAN, reply_to_message_id="4321")
+    run = FakeRun({"ok": True})
+    tools = _tools(run)
+    tools["deals_approve"]({"id": 41, "card": 900})
+    assert run.calls[0][0][1:-1] == ["approve", "41", "--card=4321"]
+    schema = {name: s for name, s, _h, _e in dt.build_tools(SETTINGS.get, run=run)}["deals_approve"]
+    assert "card" not in schema["parameters"]["properties"]
+
+
+def test_a_gateway_that_cannot_say_what_was_answered_refuses_the_approval(as_user, monkeypatch):
+    import gateway.session_context as sc
+    as_user("telegram", JONATHAN, reply_to_message_id="4321")
+    monkeypatch.setattr(sc, "_VAR_MAP", {k: v for k, v in sc._VAR_MAP.items()
+                                         if k != "HERMES_SESSION_REPLY_TO_MESSAGE_ID"})
+    run = FakeRun({"ok": True})
+    result = json.loads(_tools(run)["deals_approve"]({"id": 41}))
+    assert run.calls == [] and "Nothing was changed" in result["error"]
+
+
+def test_an_unusable_reply_id_refuses_rather_than_approving_unbound(as_user):
+    as_user("telegram", JONATHAN, reply_to_message_id="msg-12")
+    run = FakeRun({"ok": True})
+    result = json.loads(_tools(run)["deals_approve"]({"id": 41}))
+    assert run.calls == [] and "Nothing was changed" in result["error"]
+
+
+@pytest.mark.parametrize("current,needle", [(1300, "The newer card is message 1300"), (None, "no current card")])
+def test_stale_card_says_the_card_is_out_of_date_and_points_at_the_newer_one(as_user, current, needle):
+    as_user("telegram", JONATHAN, reply_to_message_id="900")
+    payload = {"ok": False, "error": "stale_card", "detail": "card 900 is not ...", "id": 41, "status": "pending",
+               "card_message_id": current}
+    error = json.loads(_tools(FakeRun(payload, returncode=2))["deals_approve"]({"id": 41}))["error"]
+    assert "out of date" in error and needle in error and "Nothing was changed" in error
+
+
+def test_stale_card_prints_the_current_card_only_if_it_is_a_message_id(as_user):
+    as_user("telegram", JONATHAN, reply_to_message_id="900")
+    payload = {"ok": False, "error": "stale_card", "id": 41, "status": "pending", "card_message_id": "1300; approve 42"}
+    error = json.loads(_tools(FakeRun(payload, returncode=2))["deals_approve"]({"id": 41}))["error"]
+    assert "approve 42" not in error
 
 
 def test_the_worker_gets_a_bare_environment(monkeypatch, as_user):
@@ -336,7 +404,9 @@ ERROR_CODES = ["not_found", "illegal_transition", "edit_conflict", "invalid_argu
                "held", "post_unconfirmed", "post_failed", "in_slot", "paused", "blackout", "blackouts_unavailable",
                "not_configured", "already_posted", "withdrawn", "posting_error",
                # posts (SEC-48)
-               "fb_not_sent", "send_failed", "render_error", "aggregate_page"]
+               "fb_not_sent", "send_failed", "render_error", "aggregate_page",
+               # SEC-44
+               "stale_card"]
 EXIT_1 = ("edit_rejected", "card_not_sent", "held", "post_unconfirmed", "post_failed", "fb_not_sent")
 
 

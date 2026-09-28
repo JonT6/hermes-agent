@@ -73,11 +73,23 @@ def _child_env() -> dict:
     return env
 
 
-async def run_worker(verb: str, candidate_id: int, settings: Mapping[str, Any],
-                     *, timeout: float = TIMEOUT_SECONDS) -> WorkerAnswer:
-    """Run ``secret-deals <verb> <candidate_id> --json`` and read its answer.
+def _stale_card_text(candidate_id: int, current: Any) -> str:
+    """SEC-44's ``stale_card``, relayed: where the newer card is. Fixed text plus ids; fits the 200-char
+    callback answer."""
+    if isinstance(current, int) and not isinstance(current, bool):
+        return (f"That card is out of date. The newer card is message {current} (candidate {candidate_id}): "
+                "approve from that one. Nothing was changed.")
+    return (f"That card is out of date, and candidate {candidate_id} has no current card right now. "
+            "Nothing was changed.")
 
-    A refusal (``ok: false``) comes back as the worker's own ``detail``, which the contract builds
+
+async def run_worker(verb: str, candidate_id: int, settings: Mapping[str, Any],
+                     *, card: Optional[int] = None, timeout: float = TIMEOUT_SECONDS) -> WorkerAnswer:
+    """Run ``secret-deals <verb> <candidate_id> [--card=<card>] --json`` and read its answer.
+
+    ``card`` (SEC-44) is the message the tapped button is on: an approval applies only while that is
+    still the candidate's current card. A ``stale_card`` refusal comes back as fixed text naming the
+    newer card; any other refusal (``ok: false``) as the worker's own ``detail``, which the contract builds
     from ids, statuses and code text only, never seller text. No JSON, a timeout or a failed start
     comes back as a fixed message; stderr goes to the log only."""
     python, workdir = settings.get("worker_python"), settings.get("worker_dir")
@@ -87,7 +99,8 @@ async def run_worker(verb: str, candidate_id: int, settings: Mapping[str, Any],
     script = Path(str(python)).parent / "secret-deals"  # the venv's console script, as launchd runs it
     try:
         proc = await asyncio.create_subprocess_exec(
-            str(script), verb, str(candidate_id), "--json", cwd=str(workdir), env=_child_env(),
+            str(script), verb, str(candidate_id), *([] if card is None else [f"--card={card}"]), "--json",
+            cwd=str(workdir), env=_child_env(),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     except OSError as exc:
         logger.warning("deals button: cannot start worker %s: %s", script, exc)
@@ -113,5 +126,7 @@ async def run_worker(verb: str, candidate_id: int, settings: Mapping[str, Any],
                                    "gateway log.")
     if payload["ok"]:
         return WorkerAnswer(True, str(payload.get("status") or ""))
+    if payload.get("error") == "stale_card":
+        return WorkerAnswer(False, _stale_card_text(candidate_id, payload.get("card_message_id")))
     detail = str(payload.get("detail") or "").strip()
     return WorkerAnswer(False, detail or f"The worker refused ({payload.get('error') or 'no error code'}).")

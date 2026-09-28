@@ -22,6 +22,7 @@ from plugins.platforms.telegram.adapter import TelegramAdapter
 OWNER = "77770367"
 SETTINGS = {"worker_python": "/w/.venv/bin/python", "worker_dir": "/w", "allowed_user_id": int(OWNER)}
 CARD_HTML = "<b>Candidate 5</b>\n┌─ title\nA &amp; B\n└─"
+CARD_ID = 4321  # the card message the buttons are on
 
 
 def _adapter():
@@ -36,6 +37,7 @@ def _query(data, user_id=OWNER):
     query.data = data
     query.message = MagicMock()
     query.message.chat_id = -100123
+    query.message.message_id = CARD_ID
     query.message.chat.type = "supergroup"
     query.message.message_thread_id = None
     query.message.text_html = CARD_HTML
@@ -65,7 +67,16 @@ class TestRouting:
     @pytest.mark.parametrize("data, verb", [("sd:approve:5", "approve"), ("sd:skip:5", "skip")])
     async def test_sd_callback_runs_the_worker_verb(self, data, verb):
         run = await _tap(_query(data), answer=sd.WorkerAnswer(True, "approved" if verb == "approve" else "skipped"))
-        run.assert_awaited_once_with(verb, 5, SETTINGS)
+        # SEC-44: an approval names the card the tapped button is on; a skip is bound to none
+        run.assert_awaited_once_with(verb, 5, SETTINGS, card=CARD_ID if verb == "approve" else None)
+
+    @pytest.mark.asyncio
+    async def test_an_approve_tap_with_no_card_message_id_runs_nothing(self):
+        query = _query("sd:approve:5")
+        query.message.message_id = None
+        run = await _tap(query)
+        run.assert_not_awaited()
+        assert "Nothing was changed" in _answer_text(query)
 
     @pytest.mark.asyncio
     async def test_other_prefixes_do_not_reach_the_worker(self):
@@ -183,6 +194,22 @@ class TestRunWorker:
                    "id": 5, "status": "posted"}
         settings, _ = _fake_worker(tmp_path, f"echo '{json.dumps(payload)}'\nexit 2")
         assert await sd.run_worker("skip", 5, settings) == sd.WorkerAnswer(False, "cannot skip candidate 5: posted")
+
+    @pytest.mark.asyncio
+    async def test_an_approval_passes_the_card_it_answers(self, tmp_path):
+        settings, workdir = _fake_worker(tmp_path, "echo '{\"ok\": true, \"id\": 5, \"status\": \"approved\"}'")
+        assert await sd.run_worker("approve", 5, settings, card=CARD_ID) == sd.WorkerAnswer(True, "approved")
+        assert (workdir / "argv").read_text().strip() == f"approve 5 --card={CARD_ID} --json"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("current, needle", [(4400, "The newer card is message 4400"), (None, "no current card")])
+    async def test_a_stale_card_is_answered_with_where_the_newer_card_is(self, tmp_path, current, needle):
+        payload = {"ok": False, "error": "stale_card", "detail": "card 4321 is not the current card",
+                   "id": 5, "status": "pending", "card_message_id": current}
+        settings, _ = _fake_worker(tmp_path, f"echo '{json.dumps(payload)}'\nexit 2")
+        answer = await sd.run_worker("approve", 5, settings, card=CARD_ID)
+        assert not answer.ok and "out of date" in answer.text and needle in answer.text
+        assert len(answer.text) <= 200  # a callback answer's cap
 
     @pytest.mark.asyncio
     async def test_no_json_is_not_a_refusal_and_keeps_stderr_out(self, tmp_path):

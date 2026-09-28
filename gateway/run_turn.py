@@ -2062,6 +2062,9 @@ class GatewayTurnMixin:
         context = build_session_context(source, self.config, session_entry)
         # Session context variables for tools (task-local, concurrency-safe)
         _session_env_tokens = self._set_session_env(context)
+        # SEC-44: what this message replies to, for tools that bind an action to it (the deals plugin)
+        from gateway.session_context import set_session_reply_to
+        set_session_reply_to(getattr(event, "reply_to_message_id", None))
         # Self-injected turns (MessageEvent(internal=True)) persist with a DB-only display_kind so
         # UIs render timeline notices, not user bubbles; role/content untouched.
         persist_user_display_kind = display_kind_for_event(event)
