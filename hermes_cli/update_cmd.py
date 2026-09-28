@@ -700,9 +700,10 @@ def _complete_source_update(request: dict | None) -> None:
         print(f"→ Source subscription moved to {request['channel_retirement']['destination']}")
 
 
-def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha, *, target_ref=None) -> None:
-    """Fast-forward failed: merge on a custom branch (local commits survive) or reset --hard on the
-    same branch after parking the old HEAD behind a rescue ref. ``sys.exit(1)`` on failure."""
+def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha, *, target_ref=None) -> bool:
+    """Fast-forward failed: merge on a custom branch (local commits survive); on the same branch,
+    refuse when it carries local-only commits, else reset --hard after parking the old HEAD behind
+    a rescue ref. False means refused with nothing moved; ``sys.exit(1)`` on failure."""
     # A custom branch (local commits atop origin/<branch>) also can't ff, and reset --hard
     # would discard that work: merge instead, stop on conflict.
     merge_ref = target_ref if target_ref is not None else f"origin/{branch}"
@@ -719,13 +720,24 @@ def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha, *, target_r
             print(f"  Resolve manually: cd {_m().PROJECT_ROOT} && git merge origin/{branch}")
             print("  Then re-run the update. Local work is untouched.")
             sys.exit(1)
-        return
-    # Same branch: the reset below is right either way, but the two causes of divergence here
-    # are indistinguishable from the checkout alone. An upstream force-push/rebase loses
-    # nothing; local commits on this branch lose everything, and the reflog is the only way
-    # back — an expiring log the user has to know to reach for, in a directory Hermes updates
-    # unattended. So park pre_pull_sha behind a rescue ref for BOTH, orphan divergence (no
-    # common ancestor: corrupted HEAD, re-init) included.
+        return True
+    # Our fork (AIA-47): the install's own branch carries our commits atop upstream, so every
+    # update diverges here, and the reset below rolled the running agent back to plain upstream
+    # (AIA-45). Refuse instead; the caller puts the autostash back. Fails closed: an unreadable
+    # count refuses too, so the reset runs only when nothing local would be lost.
+    local_only = (_git_run(git_cmd, ["rev-list", "--count", f"{merge_ref}..HEAD"]).stdout or "").strip()
+    if local_only != "0":
+        print(f"✗ Update refused: {branch} carries {local_only or 'unknown number of'} commit(s) "
+              f"that are not on origin/{branch}.")
+        print(f"  Resetting to origin/{branch} would erase them from this install, so nothing was changed.")
+        print(f"  List them: cd {_m().PROJECT_ROOT} && git log --oneline origin/{branch}..HEAD")
+        print(f"  To upgrade, bring upstream to them: merge origin/{branch} into our branch on the MacBook,")
+        print(f"  PR to fork/{branch}, then `git pull` here and restart the gateway (cawl/CLAUDE.md §Deploy routes).")
+        return False
+    # Same branch, nothing local to lose. Upstream parks pre_pull_sha behind a rescue ref here
+    # because an upstream force-push/rebase and local commits (orphan divergence included) are
+    # indistinguishable from the checkout alone; both now refuse above, so the ref is a second
+    # line of defence that keeps upstream's shape for clean merges.
     merge_base_result = _git_run(git_cmd, ["merge-base", "HEAD", merge_ref])
     has_common_ancestor = bool(
         merge_base_result.returncode == 0 and merge_base_result.stdout.strip())
@@ -763,6 +775,7 @@ def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha, *, target_r
             print(f"  {reset_result.stderr.strip()}")
         print(f"  Try manually: git fetch origin && git reset --hard origin/{branch}")
         sys.exit(1)
+    return True
 
 
 def _rollback_if_pulled_syntax_error(git_cmd, pre_pull_sha) -> None:
@@ -800,7 +813,8 @@ def _pull_updates(
     keep_stash, target_ref=None, pre_sync_sha=None, sync_upstream=False, assume_yes=False,
     in_place_update=False, _windows_gateway_resume=None):
     """Fast-forward onto ``origin/<branch>`` and settle the autostash. Divergence by shape:
-    custom branch -> merge, same branch -> rescue ref then reset; a
+    custom branch -> merge, same branch -> refuse if it carries local commits, else rescue ref
+    then reset; a
     post-pull syntax error in a critical file rolls back. Exits on failure; returns pre-pull SHA."""
     update_succeeded = False
     # Rescue refs must retain the immediate pre-pull tip, even when syntax
@@ -827,8 +841,15 @@ def _pull_updates(
                 if pre_pull_sha and not _git_run(git_cmd, ["branch", "--show-current"]).stdout.strip():
                     _git_run(git_cmd, ["update-ref", f"refs/hermes/pre-release/{pre_pull_sha}", pre_pull_sha], check=True)
                 _git_run(git_cmd, ["checkout", "--detach", merge_ref], check=True)
-            elif _git_run(git_cmd, ["merge", "--ff-only", merge_ref]).returncode != 0:
-                _reconcile_diverged_checkout(git_cmd, branch, pre_pull_sha, target_ref=merge_ref)
+            elif (_git_run(git_cmd, ["merge", "--ff-only", merge_ref]).returncode != 0
+                  and not _reconcile_diverged_checkout(git_cmd, branch, pre_pull_sha, target_ref=merge_ref)):
+                # Refused (AIA-47): HEAD never moved, so the autostash goes straight back.
+                if auto_stash_ref is not None and _m()._restore_stashed_changes(
+                        git_cmd, _m().PROJECT_ROOT, auto_stash_ref, prompt_user=False, input_fn=gw_input_fn):
+                    auto_stash_ref = None
+                    # The restore helper says "on top of the updated codebase"; nothing was updated.
+                    print("✗ Update refused: the code was not updated; local changes are back as they were.")
+                sys.exit(1)
         except KeyboardInterrupt:
             raise  # Ctrl-C reached git too (same process group): the tree may be torn, keep the marker
         except BaseException:
