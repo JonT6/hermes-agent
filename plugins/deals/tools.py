@@ -9,9 +9,13 @@ Three rules, each of which is the reason for a piece of this file:
   refuse unless the turn's originating user, as the gateway bound it for THIS turn, is
   ``allowed_user_id`` on Telegram. Reads are not gated. (get_posts changes no candidate, but it
   sends messages and may make an AliExpress call, so it is an action.)
-* **An approval is bound to the card it answers** (SEC-44). approve and post_now pass the message this
-  turn replies to as ``--card``, read from the gateway's own binding, never from the model; the worker
-  refuses a card that is no longer current (``stale_card``). No reply, no card: a typed approve.
+* **Every approval is bound to the card it answers** (SEC-44; Jonathan, 2026-09-28). approve and post_now
+  (which re-approves a held one) pass the message this turn replies to as ``--card``, read from the
+  gateway's own binding, never from the model; the worker refuses a card that is no longer current
+  (``stale_card``). A turn with no card id is refused here and the worker never runs: not a reply, a
+  reply to the forum topic's root, a follow-up like "ok approve it", or a reply the gateway merged away.
+  ``_run`` refuses approve / post-now without ``--card`` whatever built the argv. The worker's bare
+  ``approve <id>`` is for manual use on the Mini only.
 * **Seller text is data.** The product ``title`` is written by an AliExpress seller, draft texts
   by the drafting model. They reach the model only between per-result nonce markers, under a
   header that says they are data. ``detail`` is never shown: errors map the contract's codes to
@@ -71,11 +75,14 @@ def _turn_origin() -> Optional[tuple[str, str]]:
 
 
 _REPLY_TO_VAR = "HERMES_SESSION_REPLY_TO_MESSAGE_ID"
+_CARD_BOUND = ("approve", "post-now")  # worker commands that approve, or re-approve a held candidate
+NO_CARD_REFUSAL = ("Not approved: an approval through Cawl must answer the candidate's card. To approve, tap "
+                   "✅ Approve on the candidate's current card, or reply 'approve' to that card. Nothing was changed.")
 
 
 def _turn_card() -> tuple[Optional[int], Optional[str]]:
     """``(card, None)``: the message id THIS turn's message replies to (SEC-44), or None when it is not a
-    reply; ``(None, refusal)`` when that cannot be known. Read from the gateway's ContextVars only, like
+    reply (the caller refuses an approval then); ``(None, refusal)`` when that cannot be known. Read from the gateway's ContextVars only, like
     ``_turn_origin``. In a forum topic Telegram reports the topic's root message as the reply target of
     every message in it, so a reply to the root (== the thread id) is not a reply. A gateway without the
     binding (older than SEC-44) or an id that is not a message id refuses: an approval that answers a
@@ -96,7 +103,8 @@ def _turn_card() -> tuple[Optional[int], Optional[str]]:
 
 
 def _answering_card(build):
-    """SEC-44: *build*'s argv plus ``--card=<the message this turn replies to>``, when it is a reply."""
+    """SEC-44: *build*'s argv plus ``--card=<the message this turn replies to>``; a turn that answers no
+    card is refused (``NO_CARD_REFUSAL``) and the worker is not run."""
     def bound(a: dict):
         argv = build(a)
         if isinstance(argv, str):
@@ -104,7 +112,9 @@ def _answering_card(build):
         card, refusal = _turn_card()
         if refusal is not None:
             return f"{refusal} Nothing was changed."
-        return argv if card is None else [*argv, f"--card={card}"]
+        if card is None:
+            return NO_CARD_REFUSAL
+        return [*argv, f"--card={card}"]
     return bound
 
 
@@ -403,6 +413,9 @@ def _run(get_config: Callable[..., Any], argv: list[str], timeout: int, *, mutat
     if not python or not workdir:
         return None, tool_error("The deals plugin is not configured: set plugins.entries.deals.settings."
                                 "worker_python and worker_dir.")
+    if argv and argv[0] in _CARD_BOUND and not any(a.startswith("--card=") for a in argv[1:]):
+        logger.warning("deals: refused to run worker %s without --card", argv[0])
+        return None, tool_error(NO_CARD_REFUSAL)  # SEC-44's last gate: no approval reaches the worker unbound
     script = Path(str(python)).parent / "secret-deals"  # the venv's console script, as launchd runs it
     unknown = (" Whether anything changed is unknown: check with deals_show or deals_status before retrying."
                if mutating else "")
@@ -519,8 +532,8 @@ _TOOL_SPECS = (
      {}, (), None, TIMEOUT_SECONDS, lambda a: ["status"], _fmt_status),
     ("deals_approve", "✅",
      "Approve a pending candidate so it posts at its slot, or re-approve a held one at its re-check's numbers. "
-     "Only when Jonathan asks for it in his own message. When his message replies to a card, the approval is "
-     "bound to that card, and an out-of-date card is refused.",
+     "Only when Jonathan asks for it in a reply to the candidate's card: the approval is bound to that card, an "
+     "out-of-date card is refused, and a message that replies to no card is refused.",
      {"id": _ID, "note": {"type": "string", "description": "Optional note stored with the approval."}},
      ("id",), "approve a candidate", TIMEOUT_SECONDS, _answering_card(_with_id("approve", ("note", "--note"))),
      _fmt_moved),
