@@ -4979,7 +4979,7 @@ class TelegramAdapter(BasePlatformAdapter):
     _SD_LABELS = {"approved": "✅ Approved", "skipped": "❌ Skipped"}
 
     async def _handle_deals_callback(self, query, data: str, cb: Dict[str, Any]) -> None:
-        """``sd:<approve|skip>:<id>`` — a secret-deals candidate card button (SEC-71).
+        """``sd:<approve|approve_both|skip>:<id>`` — a secret-deals candidate card button (SEC-71, SEC-102).
 
         Runs the worker CLI; only the deals plugin's ``allowed_user_id`` may act, and only if the
         callback allowlist also admits them. SEC-44: an approval names the card the button is on
@@ -5002,8 +5002,9 @@ class TelegramAdapter(BasePlatformAdapter):
         if str(getattr(query.from_user, "id", "")).strip() != owner:
             await query.answer(text=_UNAUTHORIZED)
             return
-        card = getattr(query.message, "message_id", None) if verb == "approve" else None
-        if verb == "approve" and (not isinstance(card, int) or isinstance(card, bool)):
+        approves = verb in ("approve", "approve_both")
+        card = getattr(query.message, "message_id", None) if approves else None
+        if approves and (not isinstance(card, int) or isinstance(card, bool)):
             await query.answer(text="Cannot tell which card this button is on, so the approval cannot be bound to "
                                     "it. Nothing was changed.", show_alert=True)
             return

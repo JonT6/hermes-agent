@@ -13,7 +13,7 @@ and a reply to a card carries the card's text.
   post text is not in the tool result, on purpose. Cawl never re-types, summarises or rewrites
   post copy: it calls the tool and reports only whether the posts were sent.
 
-The candidate cards' **approve / skip buttons** (SEC-71, `sd:` callbacks in the Telegram adapter,
+The candidate cards' **approve / approve-both / skip buttons** (SEC-71, SEC-102, `sd:` callbacks in the Telegram adapter,
 not this plugin) read the same `plugins.entries.deals.settings`: the same worker, and the same
 `allowed_user_id` as the one owner. A tap from anyone else is refused.
 
@@ -25,8 +25,13 @@ not this plugin) read the same `plugins.entries.deals.settings`: the same worker
 - **`deals_post_now` needs SEC-46 and `deals_get_posts` needs SEC-48 on the worker.** Without
   them argparse rejects `post-now` / `posts`, and the tool answers the same way. Check with
   `.venv/bin/secret-deals post-now --help` and `.venv/bin/secret-deals posts --help`.
+- **SEC-102 (`deals_approve`'s optional `placement`, and the ✅ Telegram + Facebook button) needs the worker's
+  `approve --placement tg|both`.** Without it argparse rejects the flag and the tool or button answers "The
+  worker gave no answer". Check with `.venv/bin/secret-deals approve --help | grep -- --placement`. The
+  button waits at most 30 s for the worker (the Telegram callback answer comes after it), so a `both`
+  approval slower than that is reported as "unknown": check with `deals_show` before retrying.
 - **SEC-44 (an approval bound to its card) needs the worker's `--card` first.** `deals_approve`,
-  `deals_post_now` and the ✅ Approve button always pass `--card=<message id>`; a tool call whose turn
+  `deals_post_now` and the ✅ Telegram / ✅ Telegram + Facebook buttons always pass `--card=<message id>`; a tool call whose turn
   answers no card is refused and never reaches the worker (Jonathan, 2026-09-28: every approval
   through Cawl is tied to a card). A worker without SEC-44 rejects the flag (no JSON, "The worker gave no answer"). Check
   with `.venv/bin/secret-deals approve --help | grep -- --card`. It also needs this checkout's

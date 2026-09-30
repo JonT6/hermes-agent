@@ -105,6 +105,9 @@ def _blocks(text):
     ("deals_status", {}, ["status"]),
     ("deals_approve", {"id": 41}, ["approve", "41", f"--card={CARD}"]),
     ("deals_approve", {"id": "41", "note": "ok"}, ["approve", "41", "--note=ok", f"--card={CARD}"]),
+    ("deals_approve", {"id": 41, "placement": "both"}, ["approve", "41", "--placement", "both", f"--card={CARD}"]),
+    ("deals_approve", {"id": 41, "placement": "tg", "note": "ok"},
+     ["approve", "41", "--note=ok", "--placement", "tg", f"--card={CARD}"]),
     ("deals_skip", {"id": 41, "reason": "too pricey"}, ["skip", "41", "--reason=too pricey"]),
     ("deals_edit", {"id": 41, "note": "--status approved"}, ["edit", "41", "--note=--status approved"]),
     ("deals_media", {"id": 41, "kind": "photo", "index": 2}, ["media", "41", "photo", "2"]),
@@ -154,7 +157,7 @@ def test_no_card_id_refuses_an_approval_and_never_runs_the_worker(as_user, tool,
     result = json.loads(_tools(run)[tool]({"id": 41}))
     assert run.calls == []
     assert result["error"] == dt.NO_CARD_REFUSAL
-    assert "tap ✅ Approve on the candidate's current card" in result["error"]
+    assert "tap ✅ Telegram or ✅ Telegram + Facebook on the candidate's current card" in result["error"]
 
 
 def test_no_card_id_leaves_the_other_actions_alone(as_user):
@@ -171,6 +174,28 @@ def test_the_worker_is_never_run_for_an_approval_without_card(argv):
     run = FakeRun({"ok": True})
     payload, failure = dt._run(SETTINGS.get, argv, 30, mutating=True, run=run)
     assert payload is None and run.calls == [] and dt.NO_CARD_REFUSAL in json.loads(failure)["error"]
+
+
+@pytest.mark.parametrize("placement", ["fb", "BOTH", "both --card=900", "", 1, True])
+def test_approve_placement_outside_tg_or_both_never_reaches_the_worker(as_user, placement):
+    as_user("telegram", JONATHAN, reply_to_message_id="4321")
+    run = FakeRun({"ok": True})
+    result = json.loads(_tools(run)["deals_approve"]({"id": 41, "placement": placement}))
+    assert "placement must be tg or both" in result["error"] and run.calls == []
+
+
+def test_the_approve_description_maps_the_typed_replies_to_placement():
+    """Typed replies reach the model, not a parser (nothing in the plugin or gateway reads them), so the
+    tool description is what maps ``approve <id> tg+fb`` to placement both and plain approve to none."""
+    schema = {n: s for n, s, _h, _e in dt.build_tools(SETTINGS.get)}["deals_approve"]
+    assert "'approve <id> tg+fb' means placement 'both'" in schema["description"]
+    assert "plain 'approve <id>' means leave placement out" in schema["description"]
+
+
+def test_approve_placement_is_an_optional_enum_in_the_schema():
+    schema = {n: s for n, s, _h, _e in dt.build_tools(SETTINGS.get)}["deals_approve"]
+    assert schema["parameters"]["properties"]["placement"]["enum"] == ["tg", "both"]
+    assert schema["parameters"]["required"] == ["id"]
 
 
 def test_the_model_cannot_name_the_card(as_user):
@@ -249,6 +274,8 @@ def test_success_formats(as_user):
     as_user("telegram", JONATHAN, reply_to_message_id=CARD)
     t = _tools(FakeRun({"ok": True, "id": 41, "status": "approved"}))
     assert t["deals_approve"]({"id": 41}) == "Candidate 41 is now approved."
+    both = _tools(FakeRun({"ok": True, "id": 41, "status": "approved", "placement": "both"}))
+    assert both["deals_approve"]({"id": 41, "placement": "both"}) == "Candidate 41 is now approved. Placement: both."
     assert "PAUSED" in _tools(FakeRun({"ok": True, "paused": True}))["deals_pause"]({})
     edit = _tools(FakeRun({"ok": True, "id": 41, "previous_status": "approved", "status": "pending",
                            "draft_ids": [7, 8], "formats": ["single"], "attempt": 2, "rewritten": False,

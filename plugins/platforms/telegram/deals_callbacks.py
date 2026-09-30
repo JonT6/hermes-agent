@@ -1,7 +1,9 @@
-"""secret-deals card buttons (SEC-71): ``sd:approve:<id>`` and ``sd:skip:<id>``.
+"""secret-deals card buttons (SEC-71, SEC-102): ``sd:approve:<id>``, ``sd:approve_both:<id>``, ``sd:skip:<id>``.
 
-The secret-deals worker posts each candidate card to the ops group as this bot, with two inline
-buttons. A tap runs the worker's own CLI the way the ``deals`` plugin (SEC-14) does: the venv's
+The secret-deals worker posts each candidate card to the ops group as this bot, with three inline
+buttons: ✅ Telegram (``sd:approve``), ✅ Telegram + Facebook (``sd:approve_both``: approves with the
+worker's ``--placement both``, so a Facebook version is prepared for Jonathan to post by hand) and
+❌ (``sd:skip``). A tap runs the worker's own CLI the way the ``deals`` plugin (SEC-14) does: the venv's
 ``bin/secret-deals <verb> <id> --json``, the worker dir as cwd, a bare environment, a hard timeout.
 The worker owns every rule (which status may be approved or skipped); this module only parses the
 button, runs the CLI and reads back the one JSON object it prints (contract: the secret-deals
@@ -32,7 +34,7 @@ TIMEOUT_SECONDS = 30  # the deals plugin's approve/skip timeout
 _STDERR_LOG_CHARS = 2000
 
 # [0-9], not \d: \d also matches non-ASCII digits. fullmatch, not $: $ allows a trailing newline.
-_DATA_RE = re.compile(r"sd:(approve|skip):([0-9]+)")
+_DATA_RE = re.compile(r"sd:(approve|approve_both|skip):([0-9]+)")
 
 
 @dataclass(frozen=True)
@@ -44,7 +46,8 @@ class WorkerAnswer:
 
 
 def parse_callback(data: str) -> Optional[tuple[str, int]]:
-    """``(verb, candidate_id)`` for exactly ``sd:approve:<digits>`` / ``sd:skip:<digits>``, else None."""
+    """``(verb, candidate_id)`` for exactly ``sd:approve:<digits>`` / ``sd:approve_both:<digits>`` /
+    ``sd:skip:<digits>``, else None."""
     match = _DATA_RE.fullmatch(data or "")
     return (match.group(1), int(match.group(2))) if match else None
 
@@ -87,6 +90,7 @@ async def run_worker(verb: str, candidate_id: int, settings: Mapping[str, Any],
                      *, card: Optional[int] = None, timeout: float = TIMEOUT_SECONDS) -> WorkerAnswer:
     """Run ``secret-deals <verb> <candidate_id> [--card=<card>] --json`` and read its answer.
 
+    Verb ``approve_both`` (SEC-102) runs the worker's ``approve <id> --placement both --card=<card> --json``.
     ``card`` (SEC-44) is the message the tapped button is on: an approval applies only while that is
     still the candidate's current card. A ``stale_card`` refusal comes back as fixed text naming the
     newer card; any other refusal (``ok: false``) as the worker's own ``detail``, which the contract builds
@@ -97,9 +101,11 @@ async def run_worker(verb: str, candidate_id: int, settings: Mapping[str, Any],
         return WorkerAnswer(False, "Deals buttons are not configured: set plugins.entries.deals.settings."
                                    "worker_python and worker_dir. Nothing was changed.")
     script = Path(str(python)).parent / "secret-deals"  # the venv's console script, as launchd runs it
+    command, placement = ("approve", ["--placement", "both"]) if verb == "approve_both" else (verb, [])
     try:
         proc = await asyncio.create_subprocess_exec(
-            str(script), verb, str(candidate_id), *([] if card is None else [f"--card={card}"]), "--json",
+            str(script), command, str(candidate_id), *placement,
+            *([] if card is None else [f"--card={card}"]), "--json",
             cwd=str(workdir), env=_child_env(),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     except OSError as exc:
