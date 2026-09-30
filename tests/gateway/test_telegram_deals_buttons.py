@@ -64,15 +64,17 @@ def _answer_text(query):
 
 class TestRouting:
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("data, verb", [("sd:approve:5", "approve"), ("sd:skip:5", "skip")])
+    @pytest.mark.parametrize("data, verb", [
+        ("sd:approve:5", "approve"), ("sd:approve_both:5", "approve_both"), ("sd:skip:5", "skip")])
     async def test_sd_callback_runs_the_worker_verb(self, data, verb):
-        run = await _tap(_query(data), answer=sd.WorkerAnswer(True, "approved" if verb == "approve" else "skipped"))
-        # SEC-44: an approval names the card the tapped button is on; a skip is bound to none
-        run.assert_awaited_once_with(verb, 5, SETTINGS, card=CARD_ID if verb == "approve" else None)
+        run = await _tap(_query(data), answer=sd.WorkerAnswer(True, "skipped" if verb == "skip" else "approved"))
+        # SEC-44: either approval names the card the tapped button is on; a skip is bound to none
+        run.assert_awaited_once_with(verb, 5, SETTINGS, card=None if verb == "skip" else CARD_ID)
 
     @pytest.mark.asyncio
-    async def test_an_approve_tap_with_no_card_message_id_runs_nothing(self):
-        query = _query("sd:approve:5")
+    @pytest.mark.parametrize("data", ["sd:approve:5", "sd:approve_both:5"])
+    async def test_an_approve_tap_with_no_card_message_id_runs_nothing(self, data):
+        query = _query(data)
         query.message.message_id = None
         run = await _tap(query)
         run.assert_not_awaited()
@@ -90,7 +92,9 @@ class TestMalformed:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("data", [
         "sd:", "sd:approve", "sd:approve:", "sd:approve:abc", "sd:approve:5:6", "sd:approve:-5",
-        "sd:publish:5", "sd:APPROVE:5", "sd:approve:5\n", "sd:approve: 5", "sd:approve:٥"])
+        "sd:publish:5", "sd:APPROVE:5", "sd:approve:5\n", "sd:approve: 5", "sd:approve:٥",
+        "sd:approve_both:1x", "sd:approveboth:1", "sd:approve_both:1\n", "sd:approve_both", "sd:approve_both:",
+        "sd:approve_both:-1", "sd:approve_both:٥", "sd:approve_bothx:1", "sd:approve_:1"])
     async def test_malformed_is_answered_and_nothing_runs(self, data):
         query = _query(data)
         run = await _tap(query)
@@ -99,7 +103,9 @@ class TestMalformed:
         query.edit_message_text.assert_not_called()
 
     @pytest.mark.parametrize("data, want", [
-        ("sd:approve:5", ("approve", 5)), ("sd:skip:0012", ("skip", 12)), ("sd:skip:5x", None), ("", None)])
+        ("sd:approve:5", ("approve", 5)), ("sd:approve_both:5", ("approve_both", 5)),
+        ("sd:skip:0012", ("skip", 12)), ("sd:skip:5x", None), ("sd:approve_both:1x", None),
+        ("sd:approveboth:1", None), ("sd:approve_both:1\n", None), ("", None)])
     def test_parse_callback(self, data, want):
         assert sd.parse_callback(data) == want
 
@@ -148,7 +154,8 @@ class TestOutcome:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("data, status, label", [
-        ("sd:approve:5", "approved", "✅ Approved"), ("sd:skip:5", "skipped", "❌ Skipped")])
+        ("sd:approve:5", "approved", "✅ Approved"), ("sd:approve_both:5", "approved", "✅ Approved"),
+        ("sd:skip:5", "skipped", "❌ Skipped")])
     async def test_success_strips_buttons_and_appends_status(self, data, status, label):
         query = _query(data)
         await _tap(query, answer=sd.WorkerAnswer(True, status))
@@ -200,6 +207,17 @@ class TestRunWorker:
         settings, workdir = _fake_worker(tmp_path, "echo '{\"ok\": true, \"id\": 5, \"status\": \"approved\"}'")
         assert await sd.run_worker("approve", 5, settings, card=CARD_ID) == sd.WorkerAnswer(True, "approved")
         assert (workdir / "argv").read_text().strip() == f"approve 5 --card={CARD_ID} --json"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verb, argv", [
+        ("approve", f"approve 5 --card={CARD_ID} --json"),
+        ("approve_both", f"approve 5 --placement both --card={CARD_ID} --json"),
+        ("skip", "skip 5 --json")])
+    async def test_each_verb_runs_its_worker_argv(self, tmp_path, verb, argv):
+        settings, workdir = _fake_worker(tmp_path, "echo '{\"ok\": true, \"id\": 5, \"status\": \"approved\"}'")
+        answer = await sd.run_worker(verb, 5, settings, card=None if verb == "skip" else CARD_ID)
+        assert answer == sd.WorkerAnswer(True, "approved")
+        assert (workdir / "argv").read_text().strip() == argv
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("current, needle", [(4400, "The newer card is message 4400"), (None, "no current card")])

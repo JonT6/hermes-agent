@@ -26,4 +26,4 @@ config_schema:
     description: "The secret-deals repo (the directory with pyproject.toml). The worker runs with this as its cwd, for the tools and the card buttons alike."
   allowed_user_id:
     required: true
-    description: "Jonathan's Telegram user id, the one owner of every deals action. The mutating tools refuse unless the turn's originating user is this id on Telegram, and the candidate cards' approve/skip buttons (sd: callbacks in the Telegram adapter, SEC-71) read this same setting and refuse any other tapper. Unset refuses everyone, tools and buttons alike."
+    description: "Jonathan's Telegram user id, the one owner of every deals action. The mutating tools refuse unless the turn's originating user is this id on Telegram, and the candidate cards' approve / approve-both / skip buttons (sd: callbacks in the Telegram adapter, SEC-71) read this same setting and refuse any other tapper. Unset refuses everyone, tools and buttons alike."
