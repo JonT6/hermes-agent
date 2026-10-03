@@ -1,6 +1,6 @@
 name: deals
 version: 0.1.0
-description: "secret-deals approval tools for Jonathan (SEC-14): list, show and status read the worker's candidates; approve, skip, edit, media, pause, resume, post_now and get_posts act on them, and refuse unless the turn came from the configured Telegram user. deals_post_now publishes to the public channel at once. deals_get_posts sends Jonathan the two ready-to-copy posts itself: Cawl never re-types, summarises or rewrites post copy, it reports only whether they were sent. Every tool runs the worker's own CLI with --json; the plugin holds no business logic."
+description: "secret-deals approval tools for Jonathan (SEC-14): list, show and status read the worker's candidates; approve, skip, edit, media, pause, resume, post_now, get_posts and from_link act on them, and refuse unless the turn came from the configured Telegram user. deals_from_link (SEC-47) drafts a candidate and its card from an AliExpress link Jonathan pasted; it never posts, and its worker is left running past the 30 s the tool waits. deals_post_now publishes to the public channel at once. deals_get_posts sends Jonathan the two ready-to-copy posts itself: Cawl never re-types, summarises or rewrites post copy, it reports only whether they were sent. Every tool runs the worker's own CLI with --json; the plugin holds no business logic."
 author: Leo (JonT6)
 kind: standalone
 provides_tools:
@@ -15,6 +15,7 @@ provides_tools:
   - deals_resume
   - deals_post_now
   - deals_get_posts
+  - deals_from_link
 config_schema:
   worker_python:
     type: str

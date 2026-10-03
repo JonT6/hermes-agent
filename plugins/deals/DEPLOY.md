@@ -1,8 +1,8 @@
 # Deploying the deals plugin (SEC-14)
 
-Eleven tools in the `deals` toolset. `deals_list`, `deals_show` and `deals_status` only read.
+Twelve tools in the `deals` toolset. `deals_list`, `deals_show` and `deals_status` only read.
 `deals_approve`, `deals_skip`, `deals_edit`, `deals_media`, `deals_pause`, `deals_resume`,
-`deals_post_now` and `deals_get_posts` refuse unless the turn came from `allowed_user_id` on
+`deals_post_now`, `deals_get_posts` and `deals_from_link` refuse unless the turn came from `allowed_user_id` on
 Telegram. Every tool runs the worker's CLI with `--json` (contract: the secret-deals repo's
 `docs/cawl-contract.md`). There is no webhook and no wake. Cawl answers in the Candidates topic,
 and a reply to a card carries the card's text.
@@ -12,6 +12,14 @@ and a reply to a card carries the card's text.
 - **`deals_get_posts` sends Jonathan the two ready-to-copy posts itself** (`posts`, SEC-48). The
   post text is not in the tool result, on purpose. Cawl never re-types, summarises or rewrites
   post copy: it calls the tool and reports only whether the posts were sent.
+- **`deals_from_link` drafts a candidate from an AliExpress link Jonathan pastes** (`from-link`, SEC-47). It never
+  posts: it sends a card to Candidates, and he approves, posts now or edits from it. It spends a paid model call
+  and takes a minute or more, so the tool waits 30 s and then answers "still drafting" **without killing the
+  worker**. The plugin gives the worker its own session and temp-file output, so it finishes even if the gateway
+  restarts, and a thread logs how it ended (`finished after the timeout`, in the gateway log). ⚠️ Nothing tells
+  Cawl or Jonathan when it fails after that: no card within about five minutes means it was refused or failed,
+  and the gateway log has the exit and error code. A retry of a timed-out call is not harmful: the worker
+  warns `already_queued` on the second card.
 
 The candidate cards' **approve / approve-both / skip buttons** (SEC-71, SEC-102, `sd:` callbacks in the Telegram adapter,
 not this plugin) read the same `plugins.entries.deals.settings`: the same worker, and the same
@@ -39,6 +47,9 @@ not this plugin) read the same `plugins.entries.deals.settings`: the same worker
   plugin copy, deployed together. A SEC-44 plugin on an older gateway refuses every approval
   ("The gateway does not say which message this answers"). An older user-dir
   plugin on a SEC-44 gateway passes no card from a text reply, so that route stays unbound.
+- **`deals_from_link` needs the worker's `from-link` (SEC-47), deployed with SEC-112.** Without it argparse rejects
+  the command and the tool answers "The worker gave no answer". Check with `.venv/bin/secret-deals from-link --help`.
+  The worker half has been on the Mini since 2026-10-02 (`623089e`).
 - **The tools run `<venv>/bin/secret-deals`**, the sibling of `worker_python`, with `worker_dir`
   as the cwd and a bare environment (PATH, HOME, LANG, LC_ALL, TMPDIR, TZ). This is the same way
   the launchd jobs run. `python -m secret_deals` does not work, because the package has no `__main__`.
@@ -122,7 +133,8 @@ the Candidates topic, start a new session there (`/new`).
 | `worker_dir` | the worker repo, the directory holding `pyproject.toml`; the cwd for every call |
 | `allowed_user_id` | Jonathan's Telegram user id, the one owner of every deals action: the mutating tools **and** the card buttons (SEC-71). If it is unset, every tool action and every button tap is refused |
 
-Timeouts are 30 s; 180 s for `deals_edit` (one or two paid model calls plus a new card); 300 s for
+Timeouts are 30 s; 180 s for `deals_edit` (one or two paid model calls plus a new card); 30 s for `deals_from_link`,
+which is a wait, not a limit: after it the worker is left running and the tool says it is still drafting; 300 s for
 `deals_post_now` and `deals_get_posts` (a live AliExpress re-check or link call, which may sit in
 the client's own rate-limit retries, then Telegram sends with media uploads). When an action times
 out, the tool says the outcome is unknown and to check with `deals_show`. For `deals_post_now`,
