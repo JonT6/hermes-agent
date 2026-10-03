@@ -784,7 +784,9 @@ _TOOL_SPECS = (
      "Post an approved or held candidate in the PUBLIC Telegram channel RIGHT NOW, without waiting for the queue: "
      "it goes out publicly to every subscriber the moment this runs, and this tool cannot take it back. A held "
      "candidate is re-approved at its fresh price first. The worker re-checks price and link live and holds "
-     "instead of posting on a real change; pause and memorial-day blackouts still refuse. It counts toward today's "
+     "instead of posting on a real change; pause and memorial-day blackouts still refuse. If the same product is "
+     "already in the channel or being sent, the worker skips this candidate (duplicate_product) and force does not "
+     "change that. It counts toward today's "
      "daily limit of posts: at the limit the worker refuses with daily_cap and posts nothing. Set force only when "
      "Jonathan, after that daily_cap refusal, explicitly says to post past today's limit; never on your own "
      "initiative. Only when Jonathan asks in his own message for this candidate to post now.",
