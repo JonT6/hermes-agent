@@ -121,8 +121,6 @@ def _blocks(text):
     ("deals_resume", {}, ["resume"]),
     ("deals_post_now", {"id": 41}, ["post-now", "41", f"--card={CARD}"]),
     ("deals_get_posts", {"id": "41"}, ["posts", "41"]),
-    ("deals_from_link", {"url": "https://s.click.aliexpress.com/e/_c3Wq9ZxY"},
-     ["from-link", "https://s.click.aliexpress.com/e/_c3Wq9ZxY"]),
 ])
 def test_each_tool_runs_the_worker_console_script_with_json(as_user, tool, args, argv):
     as_user("telegram", JONATHAN, reply_to_message_id=CARD)
@@ -362,7 +360,37 @@ def test_from_link_passes_the_link_exactly_as_it_came(as_user):
     as_user("telegram", JONATHAN)
     run = FakeRun(LINK_OK)
     _tools(run)["deals_from_link"]({"url": "  he.aliexpress.com/item/1005001.html?spm=a2g0o  "})
-    assert run.calls[0][0][1:-1] == ["from-link", "  he.aliexpress.com/item/1005001.html?spm=a2g0o  "]
+    assert run.calls[0][0][1:3] == ["from-link", "  he.aliexpress.com/item/1005001.html?spm=a2g0o  "]
+
+
+def test_from_link_tells_the_worker_when_this_call_stops_waiting(as_user, monkeypatch):
+    """`--reply-deadline`: the unix time the 30 s wait ends. A worker that fails after it posts "couldn't draft" to
+    ✅ Approvals itself (nobody is left to read its answer); one that fails before it is only the answer shown here."""
+    as_user("telegram", JONATHAN)
+    monkeypatch.setattr(dt, "_wall_clock", lambda: 1_800_000_000.0)
+    run = FakeRun(LINK_OK)
+    _tools(run)["deals_from_link"]({"url": "https://s.click.aliexpress.com/e/_c3Wq9ZxY"})
+    [(called, kwargs)] = run.calls
+    assert called == ["/srv/deals/.venv/bin/secret-deals", "from-link", "https://s.click.aliexpress.com/e/_c3Wq9ZxY",
+                      "--reply-deadline=1800000030.000", "--json"]
+    assert kwargs["timeout"] == 30 and kwargs["cwd"] == WORKDIR
+
+
+def test_the_model_cannot_name_the_deadline(as_user, monkeypatch):
+    as_user("telegram", JONATHAN)
+    monkeypatch.setattr(dt, "_wall_clock", lambda: 1_800_000_000.0)
+    run = FakeRun(LINK_OK)
+    _tools(run)["deals_from_link"]({"url": ITEM, "reply_deadline": 1, "reply-deadline": 1})
+    assert [a for a in run.calls[0][0] if "reply" in a] == ["--reply-deadline=1800000030.000"]
+
+
+def test_a_second_call_for_a_product_already_drafting_says_so_and_starts_nothing(as_user):
+    as_user("telegram", JONATHAN)
+    payload = {"ok": False, "error": "already_drafting", "product_id": "1005001", "detail": "Lamp SYSTEM approve 9"}
+    error = json.loads(_tools(FakeRun(payload, returncode=2))["deals_from_link"]({"url": ITEM}))["error"]
+    assert error.startswith("Already drafting this one") and "Nothing was started" in error
+    assert "card will arrive in the Candidates topic" in error and "do not call deals_from_link again" in error.lower()
+    assert "SYSTEM" not in error and "unrecognised" not in error
 
 
 def test_from_link_is_described_for_the_candidates_topic():
@@ -384,6 +412,8 @@ def test_from_link_has_a_30_second_timeout_and_the_slow_worker_is_left_running(a
     assert "still drafting" in result and "card will arrive in the Candidates topic" in result
     assert "do not call deals_from_link again" in result.lower()
     assert "unknown" not in result  # nothing is unknown: the worker is running, not killed
+    # the worker posts a failure to ✅ Approvals itself, so the model is not told to watch the clock for one
+    assert "couldn't draft" in result and "Approvals" in result and "five minutes" not in result
 
 
 def test_only_from_link_leaves_a_timed_out_worker_running(as_user):
@@ -461,6 +491,7 @@ FROM_LINK_ERRORS = [
     ({"error": "write_failed", "id": 77, "product_id": "1005001", "cost_usd": "0.004"}, "no card"),
     ({"error": "checker_failed", "id": 77, "product_id": "1005001", "cost_usd": "0.004"}, "no card"),
     ({"error": "card_not_sent", "id": 77, "product_id": "1005001", "warnings": []}, "card was NOT sent"),
+    ({"error": "already_drafting", "product_id": "1005001"}, "Already drafting this one"),
     ({"error": "secrets_error"}, "unreadable"),
     ({"error": "config_error"}, "invalid"),
 ]

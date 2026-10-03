@@ -16,10 +16,11 @@ and a reply to a card carries the card's text.
   posts: it sends a card to Candidates, and he approves, posts now or edits from it. It spends a paid model call
   and takes a minute or more, so the tool waits 30 s and then answers "still drafting" **without killing the
   worker**. The plugin gives the worker its own session and temp-file output, so it finishes even if the gateway
-  restarts, and a thread logs how it ended (`finished after the timeout`, in the gateway log). ⚠️ Nothing tells
-  Cawl or Jonathan when it fails after that: no card within about five minutes means it was refused or failed,
-  and the gateway log has the exit and error code. A retry of a timed-out call is not harmful: the worker
-  warns `already_queued` on the second card.
+  restarts, and a thread logs how it ended (`finished after the timeout`, in the gateway log). The tool passes
+  `--reply-deadline` (now + 30 s): a worker that fails after it posts "couldn't draft <link>: <reason>" to ✅ Approvals
+  itself, once, and a failure before it is only the answer Cawl shows. A second call for a product that is still
+  drafting is refused by the worker (`already_drafting`: "Already drafting this one") and starts nothing. A run killed
+  outright posts nothing: the gateway log has it.
 
 The candidate cards' **approve / approve-both / skip buttons** (SEC-71, SEC-102, `sd:` callbacks in the Telegram adapter,
 not this plugin) read the same `plugins.entries.deals.settings`: the same worker, and the same
@@ -47,9 +48,11 @@ not this plugin) read the same `plugins.entries.deals.settings`: the same worker
   plugin copy, deployed together. A SEC-44 plugin on an older gateway refuses every approval
   ("The gateway does not say which message this answers"). An older user-dir
   plugin on a SEC-44 gateway passes no card from a text reply, so that route stays unbound.
-- **`deals_from_link` needs the worker's `from-link` (SEC-47), deployed with SEC-112.** Without it argparse rejects
-  the command and the tool answers "The worker gave no answer". Check with `.venv/bin/secret-deals from-link --help`.
-  The worker half has been on the Mini since 2026-10-02 (`623089e`).
+- **`deals_from_link` needs the worker's `from-link` (SEC-47), deployed with SEC-112, AND its `--reply-deadline` and
+  `already_drafting` (SEC-47 part 3, 2026-10-03). Deploy the worker FIRST.** Without them argparse rejects the command
+  or the flag, and every call answers "The worker gave no answer". Check with
+  `.venv/bin/secret-deals from-link --help | grep -- --reply-deadline`. The plain `from-link` has been on the Mini since
+  2026-10-02 (`623089e`); the flag has not.
 - **The tools run `<venv>/bin/secret-deals`**, the sibling of `worker_python`, with `worker_dir`
   as the cwd and a bare environment (PATH, HOME, LANG, LC_ALL, TMPDIR, TZ). This is the same way
   the launchd jobs run. `python -m secret_deals` does not work, because the package has no `__main__`.

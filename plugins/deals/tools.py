@@ -33,6 +33,7 @@ import secrets
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -59,9 +60,10 @@ _MAX_URL_CHARS = 2000
 STILL_DRAFTING = ("The worker is still drafting a candidate from that link, and it is still running: it takes about a "
                   "minute, and several if AliExpress is rate-limiting. Its card will arrive in the Candidates topic when "
                   "it is ready. Tell Jonathan only that it is drafting and the card will appear in Candidates. Do not "
-                  "call deals_from_link again for the same link: that would draft it twice. If no card has come after "
-                  "about five minutes, it was refused or failed, and nothing reaches you about that: say so, and ask "
-                  "Jonathan for the product page's own link.")
+                  "call deals_from_link again for the same link: the worker would refuse a second run while this one is "
+                  "going. If it fails, the worker posts \"couldn't draft <link>: <reason>\" to Jonathan's Approvals "
+                  "topic itself, so you have nothing to watch for or report.")
+_wall_clock = time.time  # the clock `--reply-deadline` is computed from; tests replace it
 _STDERR_LOG_CHARS = 2000
 
 STATUSES = ("pending", "approved", "held", "skipped", "posted", "dropped")
@@ -366,6 +368,9 @@ def _from_link_errors(p: dict) -> dict[str, str]:
     gate = p.get("gate")
     dropped = _FROM_LINK_DROPPED.get(p.get("error"), "")
     return {
+        "already_drafting": "Already drafting this one: a from-link for this product (or this link) is still running, and "
+                            "its card will arrive in the Candidates topic. Nothing was started. Do not call "
+                            "deals_from_link again; tell Jonathan it is already drafting.",
         "not_aliexpress": "That is not an AliExpress link (aliexpress.com, s.click.aliexpress.com or a.aliexpress.com), "
                           "so nothing was done. Ask Jonathan for the product's AliExpress link.",
         "unresolvable": "The link leads to no single AliExpress product (a store page, a search, a short link that "
@@ -675,7 +680,9 @@ def _argv_from_link(a: dict):
         return "url is required."
     if url.strip().startswith("-") or len(url) > _MAX_URL_CHARS or any(ord(c) < 32 or ord(c) == 127 for c in url):
         return "url must be the link Jonathan sent: one line, not starting with '-'."
-    return ["from-link", url]
+    # `--reply-deadline`: when this call stops waiting. A worker that fails AFTER it posts "couldn't draft" to ✅ Approvals
+    # itself; one that fails before it is only the answer this tool returns, so nothing is said twice. Never the model's.
+    return ["from-link", url, f"--reply-deadline={_wall_clock() + FROM_LINK_TIMEOUT_SECONDS:.3f}"]
 
 
 _TOOL_SPECS = (
