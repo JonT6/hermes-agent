@@ -17,7 +17,7 @@ and a reply to a card carries the card's text.
   and takes a minute or more, so the tool waits 30 s and then answers "still drafting" **without killing the
   worker**. The plugin gives the worker its own session and temp-file output, so it finishes even if the gateway
   restarts, and a thread logs how it ended (`finished after the timeout`, in the gateway log). The tool passes
-  `--reply-deadline` (now + 30 s): a worker that fails after it posts "couldn't draft <link>: <reason>" to ✅ Approvals
+  `--reply-deadline` (now + 30 s − 2 s, so a failure at the boundary is said twice, never lost): a worker that fails after it posts "couldn't draft <link>: <reason>" to ✅ Approvals
   itself, once, and a failure before it is only the answer Cawl shows. A second call for a product that is still
   drafting is refused by the worker (`already_drafting`: "Already drafting this one") and starts nothing. A run killed
   outright posts nothing: the gateway log has it.

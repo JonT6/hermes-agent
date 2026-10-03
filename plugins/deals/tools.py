@@ -55,14 +55,18 @@ POST_TIMEOUT_SECONDS = 300
 # ~5 when AliExpress rate-limits it (`docs/cawl-contract.md` §from-link), so this bound is nearly always reached. It is not
 # "give up": `_DETACHED_ON_TIMEOUT` leaves the worker running past it, and the result says it is still drafting.
 FROM_LINK_TIMEOUT_SECONDS = 30
+# `--reply-deadline` is computed before the worker starts and the wait starts after it, so the deadline is set this many
+# seconds early: a failure at the boundary is then said twice (this tool's answer AND the worker's Approvals post),
+# never zero times.
+REPLY_DEADLINE_MARGIN_SECONDS = 2
 _DETACHED_ON_TIMEOUT = frozenset({"deals_from_link"})
 _MAX_URL_CHARS = 2000
-STILL_DRAFTING = ("The worker is still drafting a candidate from that link, and it is still running: it takes about a "
-                  "minute, and several if AliExpress is rate-limiting. Its card will arrive in the Candidates topic when "
-                  "it is ready. Tell Jonathan only that it is drafting and the card will appear in Candidates. Do not "
-                  "call deals_from_link again for the same link: the worker would refuse a second run while this one is "
-                  "going. If it fails, the worker posts \"couldn't draft <link>: <reason>\" to Jonathan's Approvals "
-                  "topic itself, so you have nothing to watch for or report.")
+STILL_DRAFTING = ("The worker is still drafting it and keeps running after this wait: a draft takes about a minute, "
+                  "several minutes if AliExpress is rate-limiting, and its card will arrive in the Candidates topic. Tell "
+                  "Jonathan only that it is drafting and the card will appear in Candidates. Do not call deals_from_link "
+                  "again for this link: the worker refuses a second run while this one is going. If it fails, the worker "
+                  "itself posts \"couldn't draft <link>: <reason>\" to the ✅ Approvals topic, so there is nothing for you "
+                  "to watch or report.")
 _wall_clock = time.time  # the clock `--reply-deadline` is computed from; tests replace it
 _STDERR_LOG_CHARS = 2000
 
@@ -350,9 +354,9 @@ _FB_NOT_SENT_REASONS = {
 
 
 _FROM_LINK_GATES = {
-    "tax_threshold": "AliExpress gave no usable $ price for that variant, so the $75 import-tax test could not run",
-    "max_goods": "the goods are over the $500 cap the channel never posts over",
-    "ships_to_il": "AliExpress gives no shipping quote to Israel for it: it does not ship to Israel",
+    "tax_threshold": "AliExpress gave no usable $ price for that variant, so the import-tax threshold test could not run",
+    "max_goods": "the goods are over the channel's goods-price cap, so it can never be posted",
+    "ships_to_il": "AliExpress gave no shipping quote to Israel for it, so its landed price can't be worked out",
 }
 _FROM_LINK_DROPPED = {
     "llm_error": "OpenRouter failed",
@@ -368,21 +372,22 @@ def _from_link_errors(p: dict) -> dict[str, str]:
     gate = p.get("gate")
     dropped = _FROM_LINK_DROPPED.get(p.get("error"), "")
     return {
-        "already_drafting": "Already drafting this one: a from-link for this product (or this link) is still running, and "
+        "already_drafting": "Already drafting this one: a draft from this product (or this link) is still running, and "
                             "its card will arrive in the Candidates topic. Nothing was started. Do not call "
                             "deals_from_link again; tell Jonathan it is already drafting.",
-        "not_aliexpress": "That is not an AliExpress link (aliexpress.com, s.click.aliexpress.com or a.aliexpress.com), "
-                          "so nothing was done. Ask Jonathan for the product's AliExpress link.",
+        "not_aliexpress": "That is not an AliExpress link, so nothing was done. Ask Jonathan for the product's AliExpress "
+                          "link.",
         "unresolvable": "The link leads to no single AliExpress product (a store page, a search, a short link that "
                         "landed on the home page, or one that could not be reached), so nothing was done. Ask Jonathan "
-                        "for the product page's own link.",
+                        "for the product page's own link (the address on the item page itself).",
         "not_found": f"AliExpress has no such product for delivery to Israel (product {_code(p.get('product_id'))}). "
-                     "Nothing was done.",
+                     "Nothing was done. Tell Jonathan this product can't be drafted for Israel.",
         "gate_failed": (f"{_FROM_LINK_GATES[gate][0].upper()}{_FROM_LINK_GATES[gate][1:]}. No candidate was made."
                         if gate in _FROM_LINK_GATES else
                         f"The link was refused at a hard gate ({_code(gate)}). No candidate was made."),
-        "aliexpress_error": f"AliExpress did not answer usably for it (reason {_code(p.get('reason'))}), so no "
-                            "candidate was made. Try again later.",
+        "aliexpress_error": f"AliExpress's answer for it was unusable (reason {_code(p.get('reason'))}), so no "
+                            "candidate was made. Tell Jonathan he can send the link again later; if the same reason "
+                            "comes back, a retry won't help.",
         **{code: f"Candidate {cid} was stored, but {why}, so it was dropped with no card. Nothing was posted. Jonathan "
                  "can send the link again."
            for code, why in _FROM_LINK_DROPPED.items()},
@@ -680,9 +685,11 @@ def _argv_from_link(a: dict):
         return "url is required."
     if url.strip().startswith("-") or len(url) > _MAX_URL_CHARS or any(ord(c) < 32 or ord(c) == 127 for c in url):
         return "url must be the link Jonathan sent: one line, not starting with '-'."
-    # `--reply-deadline`: when this call stops waiting. A worker that fails AFTER it posts "couldn't draft" to ✅ Approvals
-    # itself; one that fails before it is only the answer this tool returns, so nothing is said twice. Never the model's.
-    return ["from-link", url, f"--reply-deadline={_wall_clock() + FROM_LINK_TIMEOUT_SECONDS:.3f}"]
+    # `--reply-deadline`: just before this call stops waiting. A worker that fails AFTER it posts "couldn't draft" to
+    # ✅ Approvals itself; one that fails before it is only the answer this tool returns. The margin makes a failure at the
+    # boundary said twice, never lost (review F2). Never the model's.
+    deadline = _wall_clock() + FROM_LINK_TIMEOUT_SECONDS - REPLY_DEADLINE_MARGIN_SECONDS
+    return ["from-link", url, f"--reply-deadline={deadline:.3f}"]
 
 
 _TOOL_SPECS = (
@@ -752,11 +759,11 @@ _TOOL_SPECS = (
      {"id": _ID}, ("id",), "send a candidate's posts", POST_TIMEOUT_SECONDS, _with_id("posts"), _fmt_posts),
     ("deals_from_link", "🔗",
      "Draft a candidate from an AliExpress product link and send its card to the Candidates topic. Call it when "
-     "Jonathan pastes an AliExpress link in the Candidates topic (aliexpress.com, s.click.aliexpress.com or "
-     "a.aliexpress.com): pass the link exactly as he sent it. It never posts, even if he asks to draft and post in one "
-     "message: he approves, posts now or edits from the card. It costs a paid model call and takes a minute or more: "
-     "after 30 seconds the tool says it is still drafting and the worker keeps running, so do not call it again for the "
-     "same link. Only when Jonathan sends a link.",
+     "Jonathan pastes an AliExpress link in the Candidates topic (any aliexpress.com address, including he., m., "
+     "s.click. and a.): pass the link exactly as he sent it. It never posts. If he asks to draft and post in one "
+     "message, draft only and tell him to post from the card. It costs a paid model call and takes a minute or more: "
+     f"after {FROM_LINK_TIMEOUT_SECONDS} seconds the tool says it is still drafting while the worker keeps going, so do "
+     "not call it again for the same link. Only when Jonathan sends a link.",
      {"url": {"type": "string", "description": "The AliExpress product link, exactly as Jonathan sent it."}},
      ("url",), "draft a candidate from a link", FROM_LINK_TIMEOUT_SECONDS, _argv_from_link, _fmt_from_link),
 )

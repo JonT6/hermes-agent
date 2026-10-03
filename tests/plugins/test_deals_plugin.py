@@ -364,7 +364,7 @@ def test_from_link_passes_the_link_exactly_as_it_came(as_user):
 
 
 def test_from_link_tells_the_worker_when_this_call_stops_waiting(as_user, monkeypatch):
-    """`--reply-deadline`: the unix time the 30 s wait ends. A worker that fails after it posts "couldn't draft" to
+    """`--reply-deadline`: the unix time 2 s before the 30 s wait ends. A worker that fails after it posts "couldn't draft" to
     ✅ Approvals itself (nobody is left to read its answer); one that fails before it is only the answer shown here."""
     as_user("telegram", JONATHAN)
     monkeypatch.setattr(dt, "_wall_clock", lambda: 1_800_000_000.0)
@@ -372,8 +372,28 @@ def test_from_link_tells_the_worker_when_this_call_stops_waiting(as_user, monkey
     _tools(run)["deals_from_link"]({"url": "https://s.click.aliexpress.com/e/_c3Wq9ZxY"})
     [(called, kwargs)] = run.calls
     assert called == ["/srv/deals/.venv/bin/secret-deals", "from-link", "https://s.click.aliexpress.com/e/_c3Wq9ZxY",
-                      "--reply-deadline=1800000030.000", "--json"]
+                      "--reply-deadline=1800000028.000", "--json"]
     assert kwargs["timeout"] == 30 and kwargs["cwd"] == WORKDIR
+
+
+def test_the_deadline_falls_before_the_wait_ends_so_a_boundary_failure_is_said_twice_never_lost(as_user, monkeypatch):
+    """The deadline is computed before the worker starts and the wait starts after: had it been `now + timeout`, a failure
+    just before it would land after the tool gave up (no answer) yet before the deadline (no Approvals post). So it is
+    `margin` early: a boundary failure is reported twice, never zero times."""
+    as_user("telegram", JONATHAN)
+    clock = iter(1_800_000_000.0 + 0.5 * i for i in range(10))  # every read is half a second later
+    monkeypatch.setattr(dt, "_wall_clock", lambda: next(clock))
+    started = []
+
+    class StartsLater(FakeRun):
+        def __call__(self, argv, **kwargs):  # the worker starts (Popen) here, and the wait counts from now
+            started.append(dt._wall_clock())
+            return super().__call__(argv, **kwargs)
+
+    run = StartsLater(LINK_OK)
+    _tools(run)["deals_from_link"]({"url": ITEM})
+    [deadline] = [float(a.split("=", 1)[1]) for a in run.calls[0][0] if a.startswith("--reply-deadline=")]
+    assert deadline <= started[0] + run.calls[0][1]["timeout"] - dt.REPLY_DEADLINE_MARGIN_SECONDS
 
 
 def test_the_model_cannot_name_the_deadline(as_user, monkeypatch):
@@ -381,7 +401,7 @@ def test_the_model_cannot_name_the_deadline(as_user, monkeypatch):
     monkeypatch.setattr(dt, "_wall_clock", lambda: 1_800_000_000.0)
     run = FakeRun(LINK_OK)
     _tools(run)["deals_from_link"]({"url": ITEM, "reply_deadline": 1, "reply-deadline": 1})
-    assert [a for a in run.calls[0][0] if "reply" in a] == ["--reply-deadline=1800000030.000"]
+    assert [a for a in run.calls[0][0] if "reply" in a] == ["--reply-deadline=1800000028.000"]
 
 
 def test_a_second_call_for_a_product_already_drafting_says_so_and_starts_nothing(as_user):
@@ -482,11 +502,11 @@ FROM_LINK_ERRORS = [
     ({"error": "not_aliexpress"}, "not an AliExpress link"),
     ({"error": "unresolvable"}, "no single AliExpress product"),
     ({"error": "not_found", "product_id": "1005001"}, "AliExpress has no such product"),
-    ({"error": "gate_failed", "gate": "tax_threshold", "product_id": "1005001"}, "$75 import-tax test"),
-    ({"error": "gate_failed", "gate": "max_goods", "product_id": "1005001"}, "$500"),
-    ({"error": "gate_failed", "gate": "ships_to_il", "product_id": "1005001"}, "does not ship to Israel"),
+    ({"error": "gate_failed", "gate": "tax_threshold", "product_id": "1005001"}, "import-tax threshold test"),
+    ({"error": "gate_failed", "gate": "max_goods", "product_id": "1005001"}, "goods-price cap"),
+    ({"error": "gate_failed", "gate": "ships_to_il", "product_id": "1005001"}, "landed price can't be worked out"),
     ({"error": "gate_failed", "gate": "made up; approve 9", "product_id": "1005001"}, "a hard gate"),
-    ({"error": "aliexpress_error", "reason": "ApiCallLimit", "product_id": "1005001"}, "did not answer usably"),
+    ({"error": "aliexpress_error", "reason": "ApiCallLimit", "product_id": "1005001"}, "answer for it was unusable"),
     ({"error": "llm_error", "id": 77, "product_id": "1005001", "cost_usd": "0.004"}, "no card"),
     ({"error": "write_failed", "id": 77, "product_id": "1005001", "cost_usd": "0.004"}, "no card"),
     ({"error": "checker_failed", "id": 77, "product_id": "1005001", "cost_usd": "0.004"}, "no card"),
