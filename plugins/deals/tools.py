@@ -466,6 +466,12 @@ def _error_text(p: dict, command: Optional[str] = None) -> str:
         "posting_error": f"Candidate {cid}'s approved draft no longer renders as approved: a data fault, details in "
                          "the worker log. Nothing was sent.",
         "daily_cap": _daily_cap_text(p, cid, status),  # SEC-128
+        # SEC-132: `can_force` is false here, and the worker refuses a forced retry the same way
+        "duplicate_product": f"Candidate {cid} was NOT posted and is now skipped: it is the same product as "
+                             + (f"candidate {_code(p.get('duplicate_of'))}" if _is_count(p.get("duplicate_of"))
+                                else "an earlier post")
+                             + ", already in the channel or being sent. Nothing was sent. Do not offer or try to post "
+                             "it anyway: force=true is refused the same way.",
         # posts (SEC-48)
         "fb_not_sent": "\n".join([
             f"Only candidate {cid}'s Telegram post WAS sent to Jonathan"

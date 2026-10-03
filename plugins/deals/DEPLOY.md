@@ -13,6 +13,9 @@ and a reply to a card carries the card's text.
   and the tool says so with the day's count. Its optional `force: true` passes `--force` and posts past the cap. The tool
   description allows that only when Jonathan explicitly asks after a `daily_cap` refusal (Jonathan, 2026-10-03: a
   post-now counts toward the cap, can be forced past it, and may post at any hour).
+  SEC-132: a candidate whose product is already in the channel (inside the repost cooldown) or being sent is refused
+  `duplicate_product` and is now `skipped`; the tool names the other candidate and says not to offer "post anyway",
+  because `force` does not override it.
 - **`deals_get_posts` sends Jonathan the two ready-to-copy posts itself** (`posts`, SEC-48). The
   post text is not in the tool result, on purpose. Cawl never re-types, summarises or rewrites
   post copy: it calls the tool and reports only whether the posts were sent.
@@ -60,6 +63,9 @@ not this plugin) read the same `plugins.entries.deals.settings`: the same worker
 - **`deals_post_now`'s `force` needs the worker's `post-now --force` (SEC-128).** Without it, a forced call is rejected by
   argparse and the tool answers "The worker gave no answer". A worker without SEC-128 also never refuses `daily_cap`, so
   nothing prompts a forced call. Check with `.venv/bin/secret-deals post-now --help | grep -- --force`.
+- **`duplicate_product` (SEC-132) can deploy in either order.** A worker without SEC-132 never sends it, so this plugin
+  is safe first. A worker with SEC-132 under an older plugin still refuses and skips correctly, but the tool answers
+  "unrecognised error code (duplicate_product)" instead of naming the other candidate.
 - **The tools run `<venv>/bin/secret-deals`**, the sibling of `worker_python`, with `worker_dir`
   as the cwd and a bare environment (PATH, HOME, LANG, LC_ALL, TMPDIR, TZ). This is the same way
   the launchd jobs run. `python -m secret_deals` does not work, because the package has no `__main__`.
