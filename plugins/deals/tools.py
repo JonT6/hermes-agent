@@ -304,8 +304,10 @@ def _fmt_edit(p: dict, frame: _Frame) -> str:
 
 
 def _fmt_post_now(p: dict, frame: _Frame) -> str:
+    # SEC-128: `forced` is present only when it went out past the daily cap.
+    forced = " It went out past today's daily limit and counts toward today's posts." if p.get("forced") is True else ""
     return (f"Candidate {_code(p.get('id'))} was posted in the public channel just now "
-            f"(message {_code(p.get('message_id'))}, post key {_code(p.get('post_key'))}).")
+            f"(message {_code(p.get('message_id'))}, post key {_code(p.get('post_key'))}).{forced}")
 
 
 def _fmt_from_link(p: dict, frame: _Frame) -> str:
@@ -398,6 +400,22 @@ def _from_link_errors(p: dict) -> dict[str, str]:
     }
 
 
+def _is_count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _daily_cap_text(p: dict, cid: str, status: str) -> str:
+    """post-now at the day's cap (SEC-128). The counts ride only on the worker's pre-claim refusal; a cap reached in a race
+    just before the send answers with ``id`` and ``status`` alone. The paced queue drains ``approved`` candidates only, so a
+    held one is not said to be queued."""
+    n, cap = p.get("posted_today"), p.get("daily_cap")
+    reached = (f"today already has {n} of {cap} posts, the daily limit" if _is_count(n) and _is_count(cap)
+               else "today's posts reached the daily limit just before the send")
+    stays = {"approved": " It stays approved, queued for tomorrow.", "held": " It stays held."}.get(status, "")
+    return (f"Candidate {cid} was NOT posted: {reached}. Nothing was sent.{stays} Tell Jonathan; he can say to post it "
+            "anyway. Only then call deals_post_now again with force=true (it counts toward today's posts).")
+
+
 def _error_text(p: dict, command: Optional[str] = None) -> str:
     code, cid = p.get("error"), _code(p.get("id"))
     status = p.get("status") if p.get("status") in STATUSES else "unknown"
@@ -447,6 +465,7 @@ def _error_text(p: dict, command: Optional[str] = None) -> str:
         "withdrawn": f"Candidate {cid} was skipped between the re-check and the send. Nothing was sent.",
         "posting_error": f"Candidate {cid}'s approved draft no longer renders as approved: a data fault, details in "
                          "the worker log. Nothing was sent.",
+        "daily_cap": _daily_cap_text(p, cid, status),  # SEC-128
         # posts (SEC-48)
         "fb_not_sent": "\n".join([
             f"Only candidate {cid}'s Telegram post WAS sent to Jonathan"
@@ -660,6 +679,18 @@ def _argv_approve(a: dict):
     return [*argv, "--placement", a["placement"]]
 
 
+def _argv_post_now(a: dict):
+    """post-now's argv, plus ``--force`` only for ``force`` exactly true (SEC-128): past the daily cap is a public post,
+    so a string or a number is refused rather than read as yes."""
+    argv = _with_id("post-now")(a)
+    force = a.get("force")
+    if isinstance(argv, str) or force is None or force is False:
+        return argv
+    if force is not True:
+        return "force must be true or false."
+    return [*argv, "--force"]
+
+
 def _argv_media(a: dict):
     cid = _int_arg(a, "id")
     if cid is None:
@@ -707,7 +738,8 @@ _TOOL_SPECS = (
      "pending. Read-only.",
      {}, (), None, TIMEOUT_SECONDS, lambda a: ["status"], _fmt_status),
     ("deals_approve", "✅",
-     "Approve a pending candidate so it posts at its slot, or re-approve a held one at its re-check's numbers. "
+     "Approve a pending candidate so it joins the posting queue (the worker posts it as soon as its pacing allows), "
+     "or re-approve a held one at its re-check's numbers. "
      "Only when Jonathan asks for it in a reply to the candidate's card: the approval is bound to that card, an "
      "out-of-date card is refused, and a message that replies to no card is refused. Placement: a reply "
      "'approve <id> tg+fb' means placement 'both' (Telegram, plus a Facebook version for Jonathan to post by "
@@ -743,13 +775,18 @@ _TOOL_SPECS = (
      "Resume posting after a pause. Only when Jonathan asks.",
      {}, (), "resume posting", TIMEOUT_SECONDS, lambda a: ["resume"], _fmt_paused),
     ("deals_post_now", "📣",
-     "Post an approved or held candidate in the PUBLIC Telegram channel RIGHT NOW, outside the slot schedule: "
+     "Post an approved or held candidate in the PUBLIC Telegram channel RIGHT NOW, without waiting for the queue: "
      "it goes out publicly to every subscriber the moment this runs, and this tool cannot take it back. A held "
      "candidate is re-approved at its fresh price first. The worker re-checks price and link live and holds "
-     "instead of posting on a real change; pause and memorial-day blackouts still refuse. Uses no slot. Only when "
-     "Jonathan asks in his own message for this candidate to post now.",
-     {"id": _ID}, ("id",), "post a candidate publicly", POST_TIMEOUT_SECONDS, _answering_card(_with_id("post-now")),
-     _fmt_post_now),
+     "instead of posting on a real change; pause and memorial-day blackouts still refuse. It counts toward today's "
+     "daily limit of posts: at the limit the worker refuses with daily_cap and posts nothing. Set force only when "
+     "Jonathan, after that daily_cap refusal, explicitly says to post past today's limit; never on your own "
+     "initiative. Only when Jonathan asks in his own message for this candidate to post now.",
+     {"id": _ID,
+      "force": {"type": "boolean",
+                "description": "Post past today's daily limit. Only after a daily_cap refusal, and only when Jonathan "
+                               "explicitly says to post it anyway; never on your own initiative. Omit otherwise."}},
+     ("id",), "post a candidate publicly", POST_TIMEOUT_SECONDS, _answering_card(_argv_post_now), _fmt_post_now),
     ("deals_get_posts", "📋",
      "Send Jonathan a candidate's two ready-to-copy posts, Telegram then Facebook, as messages in the Candidates "
      "topic, for him to post by hand. The tool sends them itself and does not return their text. Never re-type, "
