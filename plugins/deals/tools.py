@@ -466,6 +466,12 @@ def _error_text(p: dict, command: Optional[str] = None) -> str:
         "posting_error": f"Candidate {cid}'s approved draft no longer renders as approved: a data fault, details in "
                          "the worker log. Nothing was sent.",
         "daily_cap": _daily_cap_text(p, cid, status),  # SEC-128
+        # SEC-132: `can_force` is false here, and the worker refuses a forced retry the same way
+        "duplicate_product": f"Candidate {cid} was NOT posted and is now skipped: it is the same product as "
+                             + (f"candidate {_code(p.get('duplicate_of'))}" if _is_count(p.get("duplicate_of"))
+                                else "an earlier post")
+                             + ", already in the channel or being sent. Nothing was sent. Do not offer or try to post "
+                             "it anyway: force=true is refused the same way.",
         # posts (SEC-48)
         "fb_not_sent": "\n".join([
             f"Only candidate {cid}'s Telegram post WAS sent to Jonathan"
@@ -778,7 +784,9 @@ _TOOL_SPECS = (
      "Post an approved or held candidate in the PUBLIC Telegram channel RIGHT NOW, without waiting for the queue: "
      "it goes out publicly to every subscriber the moment this runs, and this tool cannot take it back. A held "
      "candidate is re-approved at its fresh price first. The worker re-checks price and link live and holds "
-     "instead of posting on a real change; pause and memorial-day blackouts still refuse. It counts toward today's "
+     "instead of posting on a real change; pause and memorial-day blackouts still refuse. If the same product is "
+     "already in the channel or being sent, the worker skips this candidate (duplicate_product) and force does not "
+     "change that. It counts toward today's "
      "daily limit of posts: at the limit the worker refuses with daily_cap and posts nothing. Set force only when "
      "Jonathan, after that daily_cap refusal, explicitly says to post past today's limit; never on your own "
      "initiative. Only when Jonathan asks in his own message for this candidate to post now.",
