@@ -1,4 +1,6 @@
-"""SEC-71: the secret-deals candidate card buttons, ``sd:approve:<id>`` / ``sd:skip:<id>``."""
+"""SEC-71: the secret-deals candidate card buttons, ``sd:approve:<id>`` / ``sd:skip:<id>``.
+
+SEC-125 adds the taste-card verbs ``sd:taste_post|taste_never|taste_unsure:<id>`` (classes at the end)."""
 
 import json
 import os
@@ -252,3 +254,170 @@ class TestRunWorker:
             assert sd.deals_settings() == SETTINGS
         with patch("hermes_cli.config.load_config_readonly", return_value={}):
             assert sd.deals_settings() == {}
+
+
+# --- SEC-125: the daily taste batch's one-photo cards ---------------------------------------------------
+
+TASTE_TITLE = "Ceramic table lamp, 25 cm"
+KEYBOARD = object()  # stands in for the card's InlineKeyboardMarkup
+TASTE_VERBS = [("taste_post", "post", "👍 Would post"), ("taste_never", "never", "👎 Never"),
+               ("taste_unsure", "unsure", "🤷 Not sure")]
+
+
+def _photo_query(data, caption=TASTE_TITLE, user_id=OWNER):
+    """A tap on a taste card: a photo message, so it has a caption and no text."""
+    query = _query(data, user_id=user_id)
+    query.message.text = None
+    query.message.text_html = None
+    query.message.caption = caption
+    query.message.reply_markup = KEYBOARD
+    return query
+
+
+class TestTasteRouting:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verb, answer, label", TASTE_VERBS)
+    async def test_each_taste_verb_runs_the_worker_with_its_ask_id_and_no_card(self, verb, answer, label):
+        run = await _tap(_photo_query(f"sd:{verb}:7"), answer=sd.WorkerAnswer(True, answer))
+        run.assert_awaited_once_with(verb, 7, SETTINGS, card=None)
+
+    @pytest.mark.parametrize("data, want", [
+        ("sd:taste_post:5", ("taste_post", 5)), ("sd:taste_never:5", ("taste_never", 5)),
+        ("sd:taste_unsure:0012", ("taste_unsure", 12)), ("sd:taste_post:5x", None), ("sd:taste_maybe:5", None)])
+    def test_parse_callback(self, data, want):
+        assert sd.parse_callback(data) == want
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("data", [
+        "sd:taste_post", "sd:taste_post:", "sd:taste_post:abc", "sd:taste_post:5:6", "sd:taste_post:-5",
+        "sd:taste_post: 5", "sd:taste_post:5\n", "sd:taste_post:٥", "sd:TASTE_POST:5", "sd:taste:5",
+        "sd:taste_maybe:5", "sd:taste_postx:5", "sd:taste_:5", "sd:taste_post_never:5", "sd:taste_answer:5"])
+    async def test_malformed_taste_data_is_answered_and_nothing_runs(self, data):
+        query = _photo_query(data)
+        run = await _tap(query)
+        run.assert_not_awaited()
+        assert "Invalid" in _answer_text(query)
+        query.edit_message_caption.assert_not_called()
+
+
+class TestTasteAuth:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verb, answer, label", TASTE_VERBS)
+    async def test_non_owner_is_refused(self, verb, answer, label):
+        query = _photo_query(f"sd:{verb}:7", user_id="222")
+        run = await _tap(query)  # the gateway allowlist admits everyone; the owner gate does not
+        run.assert_not_awaited()
+        assert _answer_text(query) == unauthorized_action_notice("telegram")
+        query.edit_message_caption.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_owner_outside_the_gateway_allowlist_is_refused(self):
+        query = _photo_query("sd:taste_post:7")
+        run = await _tap(query, allowed_users="111")
+        run.assert_not_awaited()
+        assert _answer_text(query) == unauthorized_action_notice("telegram")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("allowed", [None, "", True])
+    async def test_unset_owner_refuses_everyone(self, allowed):
+        query = _photo_query("sd:taste_post:7")
+        run = await _tap(query, settings={**SETTINGS, "allowed_user_id": allowed})
+        run.assert_not_awaited()
+        assert "allowed_user_id is not set" in _answer_text(query)
+        query.edit_message_caption.assert_not_called()
+
+
+class TestTasteOutcome:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verb, answer, label", TASTE_VERBS)
+    async def test_success_edits_the_caption_and_keeps_the_buttons(self, verb, answer, label):
+        query = _photo_query(f"sd:{verb}:7")
+        await _tap(query, answer=sd.WorkerAnswer(True, answer))
+        assert _answer_text(query) == label
+        query.edit_message_caption.assert_awaited_once_with(
+            caption=f"{TASTE_TITLE}\n\n— {label} by Jonathan", reply_markup=KEYBOARD)
+        query.edit_message_text.assert_not_called()  # a photo message has no text to edit
+        query.edit_message_reply_markup.assert_not_called()  # the buttons stay
+
+    @pytest.mark.asyncio
+    async def test_the_caption_is_plain_text_never_html(self):
+        query = _photo_query("sd:taste_post:7", caption="Lamp <b>& co</b>")
+        await _tap(query, answer=sd.WorkerAnswer(True, "post"))
+        kwargs = query.edit_message_caption.call_args.kwargs
+        assert "parse_mode" not in kwargs
+        assert kwargs["caption"].startswith("Lamp <b>& co</b>\n\n")
+
+    @pytest.mark.asyncio
+    async def test_a_second_tap_replaces_the_status_line_instead_of_stacking(self):
+        first = f"{TASTE_TITLE}\n\n— 👍 Would post by Jonathan"
+        query = _photo_query("sd:taste_never:7", caption=first)
+        await _tap(query, answer=sd.WorkerAnswer(True, "never"))
+        assert query.edit_message_caption.call_args.kwargs["caption"] == \
+            f"{TASTE_TITLE}\n\n— 👎 Never by Jonathan"
+
+    @pytest.mark.asyncio
+    async def test_a_title_that_looks_like_a_status_line_is_kept(self):
+        """Only a status line this code wrote (one of the three labels) is replaced, never seller text."""
+        title = "Set of 2\n\n— made by hand"
+        query = _photo_query("sd:taste_post:7", caption=title)
+        await _tap(query, answer=sd.WorkerAnswer(True, "post"))
+        assert query.edit_message_caption.call_args.kwargs["caption"] == f"{title}\n\n— 👍 Would post by Jonathan"
+
+    @pytest.mark.asyncio
+    async def test_worker_refusal_is_answered_and_the_card_is_not_edited(self):
+        query = _photo_query("sd:taste_post:7")
+        await _tap(query, answer=sd.WorkerAnswer(False, "taste ask 7 was never sent, so it has no card"))
+        assert _answer_text(query) == "taste ask 7 was never sent, so it has no card"
+        assert query.answer.call_args.kwargs["show_alert"] is True
+        query.edit_message_caption.assert_not_called()
+        query.edit_message_reply_markup.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_caption_edit_does_not_strip_the_buttons(self, caplog):
+        query = _photo_query("sd:taste_post:7")
+        query.edit_message_caption.side_effect = RuntimeError("message is not modified")
+        await _tap(query, answer=sd.WorkerAnswer(True, "post"))
+        assert _answer_text(query) == "👍 Would post"  # the toast still confirmed the saved answer
+        query.edit_message_reply_markup.assert_not_called()
+        assert "taste caption edit failed" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_the_approve_path_is_unchanged_by_taste_verbs(self):
+        """An approve still edits text and strips the buttons, even on a message that has a caption."""
+        query = _photo_query("sd:approve:5")
+        query.message.text_html = CARD_HTML
+        await _tap(query, answer=sd.WorkerAnswer(True, "approved"))
+        assert query.edit_message_text.call_args.kwargs["reply_markup"] is None
+        query.edit_message_caption.assert_not_called()
+
+
+class TestRunWorkerTaste:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verb, answer, label", TASTE_VERBS)
+    async def test_each_taste_verb_runs_taste_answer_with_json(self, tmp_path, verb, answer, label):
+        settings, workdir = _fake_worker(tmp_path, f"echo '{{\"ok\": true, \"ask_id\": 7, \"status\": \"{answer}\"}}'")
+        with patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "secret-canary"}):
+            result = await sd.run_worker(verb, 7, settings)
+        assert result == sd.WorkerAnswer(True, answer)
+        assert (workdir / "argv").read_text().strip() == f"taste answer 7 {answer} --json"
+        assert "secret-canary" not in (workdir / "env").read_text()
+
+    @pytest.mark.asyncio
+    async def test_a_taste_tap_never_passes_a_card_or_placement(self, tmp_path):
+        settings, workdir = _fake_worker(tmp_path, "echo '{\"ok\": true, \"status\": \"post\"}'")
+        await sd.run_worker("taste_post", 7, settings, card=CARD_ID)
+        argv = (workdir / "argv").read_text()
+        assert "--card" not in argv and "--placement" not in argv
+
+    @pytest.mark.asyncio
+    async def test_refusal_returns_the_workers_detail(self, tmp_path):
+        payload = {"ok": False, "error": "not_found", "detail": "no taste ask 7"}
+        settings, _ = _fake_worker(tmp_path, f"echo '{json.dumps(payload)}'\nexit 2")
+        assert await sd.run_worker("taste_post", 7, settings) == sd.WorkerAnswer(False, "no taste ask 7")
+
+    @pytest.mark.asyncio
+    async def test_timeout_names_the_taste_card_not_a_candidate(self, tmp_path):
+        settings, _ = _fake_worker(tmp_path, "exec sleep 5")
+        answer = await sd.run_worker("taste_post", 7, settings, timeout=0.3)
+        assert not answer.ok and "unknown" in answer.text and "taste card 7" in answer.text
+        assert "candidate" not in answer.text

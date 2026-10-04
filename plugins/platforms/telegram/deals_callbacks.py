@@ -1,4 +1,5 @@
-"""secret-deals card buttons (SEC-71, SEC-102): ``sd:approve:<id>``, ``sd:approve_both:<id>``, ``sd:skip:<id>``.
+"""secret-deals card buttons (SEC-71, SEC-102, SEC-125): ``sd:approve:<id>``, ``sd:approve_both:<id>``,
+``sd:skip:<id>``, and the taste-card verbs ``sd:taste_post:<id>``, ``sd:taste_never:<id>``, ``sd:taste_unsure:<id>``.
 
 The secret-deals worker posts each candidate card to the ops group as this bot, with three inline
 buttons: ✅ Telegram (``sd:approve``), ✅ Telegram + Facebook (``sd:approve_both``: approves with the
@@ -8,6 +9,11 @@ worker's ``--placement both``, so a Facebook version is prepared for Jonathan to
 The worker owns every rule (which status may be approved or skipped); this module only parses the
 button, runs the CLI and reads back the one JSON object it prints (contract: the secret-deals
 repo's ``docs/cawl-contract.md``). Never the SQLite store directly.
+
+SEC-125: the daily taste batch posts one-photo cards to the Ops group's Taste topic with 👍 / 👎 / 🤷. Those
+three verbs carry a taste *ask* id (not a candidate id) and run the worker's ``taste answer <ask_id>
+post|never|unsure --json``. The worker owns what an answer does; this module only maps the verb and reads
+back the one JSON object. A taste tap never answers in a channel: Cawl only edits the card it was tapped on.
 
 Settings are the deals plugin's own, ``plugins.entries.deals.settings``: ``worker_python``,
 ``worker_dir`` and ``allowed_user_id``, so the buttons and the tools share one worker and one
@@ -34,7 +40,10 @@ TIMEOUT_SECONDS = 30  # the deals plugin's approve/skip timeout
 _STDERR_LOG_CHARS = 2000
 
 # [0-9], not \d: \d also matches non-ASCII digits. fullmatch, not $: $ allows a trailing newline.
-_DATA_RE = re.compile(r"sd:(approve|approve_both|skip):([0-9]+)")
+_DATA_RE = re.compile(r"sd:(approve|approve_both|skip|taste_post|taste_never|taste_unsure):([0-9]+)")
+
+# SEC-125: the taste verbs and the worker answer each one records (``taste answer <ask_id> <answer>``).
+TASTE_ANSWERS = {"taste_post": "post", "taste_never": "never", "taste_unsure": "unsure"}
 
 
 @dataclass(frozen=True)
@@ -46,8 +55,8 @@ class WorkerAnswer:
 
 
 def parse_callback(data: str) -> Optional[tuple[str, int]]:
-    """``(verb, candidate_id)`` for exactly ``sd:approve:<digits>`` / ``sd:approve_both:<digits>`` /
-    ``sd:skip:<digits>``, else None."""
+    """``(verb, id)`` for exactly ``sd:<verb>:<digits>`` with verb one of ``approve``, ``approve_both``,
+    ``skip`` (a candidate id) or ``taste_post``, ``taste_never``, ``taste_unsure`` (a taste ask id), else None."""
     match = _DATA_RE.fullmatch(data or "")
     return (match.group(1), int(match.group(2))) if match else None
 
@@ -91,6 +100,8 @@ async def run_worker(verb: str, candidate_id: int, settings: Mapping[str, Any],
     """Run ``secret-deals <verb> <candidate_id> [--card=<card>] --json`` and read its answer.
 
     Verb ``approve_both`` (SEC-102) runs the worker's ``approve <id> --placement both --card=<card> --json``.
+    A taste verb (SEC-125) runs ``taste answer <id> post|never|unsure --json``: the id is a taste ask's, and
+    there is no ``--card``, because a tap names its ask and the last tap wins.
     ``card`` (SEC-44) is the message the tapped button is on: an approval applies only while that is
     still the candidate's current card. A ``stale_card`` refusal comes back as fixed text naming the
     newer card; any other refusal (``ok: false``) as the worker's own ``detail``, which the contract builds
@@ -101,11 +112,15 @@ async def run_worker(verb: str, candidate_id: int, settings: Mapping[str, Any],
         return WorkerAnswer(False, "Deals buttons are not configured: set plugins.entries.deals.settings."
                                    "worker_python and worker_dir. Nothing was changed.")
     script = Path(str(python)).parent / "secret-deals"  # the venv's console script, as launchd runs it
-    command, placement = ("approve", ["--placement", "both"]) if verb == "approve_both" else (verb, [])
+    taste = verb in TASTE_ANSWERS
+    if taste:
+        argv = ["taste", "answer", str(candidate_id), TASTE_ANSWERS[verb], "--json"]
+    else:
+        command, placement = ("approve", ["--placement", "both"]) if verb == "approve_both" else (verb, [])
+        argv = [command, str(candidate_id), *placement, *([] if card is None else [f"--card={card}"]), "--json"]
     try:
         proc = await asyncio.create_subprocess_exec(
-            str(script), command, str(candidate_id), *placement,
-            *([] if card is None else [f"--card={card}"]), "--json",
+            str(script), *argv,
             cwd=str(workdir), env=_child_env(),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     except OSError as exc:
@@ -117,8 +132,9 @@ async def run_worker(verb: str, candidate_id: int, settings: Mapping[str, Any],
         proc.kill()
         await proc.wait()
         logger.warning("deals button: worker %s %s timed out after %ss", verb, candidate_id, timeout)
-        return WorkerAnswer(False, f"The worker did not answer within {timeout:g}s. Whether candidate "
-                                   f"{candidate_id} changed is unknown: ask Cawl for its status before retrying.")
+        subject = f"taste card {candidate_id} was answered" if taste else f"candidate {candidate_id} changed"
+        return WorkerAnswer(False, f"The worker did not answer within {timeout:g}s. Whether {subject} is unknown: "
+                                   + ("tap again to be sure." if taste else "ask Cawl for its status before retrying."))
     stdout = (stdout_b or b"").decode("utf-8", errors="replace").strip()
     try:
         payload = json.loads(stdout) if stdout else None
