@@ -4977,14 +4977,19 @@ class TelegramAdapter(BasePlatformAdapter):
             await query.edit_message_text(text=appended, **({} if is_state_verb else {"reply_markup": None}))
 
     _SD_LABELS = {"approved": "✅ Approved", "skipped": "❌ Skipped"}
+    # SEC-125: the worker's ``taste answer`` status for a taste card tap
+    _SD_TASTE_LABELS = {"post": "👍 Would post", "never": "👎 Never", "unsure": "🤷 Not sure"}
 
     async def _handle_deals_callback(self, query, data: str, cb: Dict[str, Any]) -> None:
-        """``sd:<approve|approve_both|skip>:<id>`` — a secret-deals candidate card button (SEC-71, SEC-102).
+        """``sd:<approve|approve_both|skip|taste_post|taste_never|taste_unsure>:<id>`` — a secret-deals card
+        button (SEC-71, SEC-102, SEC-125).
 
         Runs the worker CLI; only the deals plugin's ``allowed_user_id`` may act, and only if the
         callback allowlist also admits them. SEC-44: an approval names the card the button is on
         (``--card``), so a tap on an out-of-date card is refused. A refusal is answered with the
-        worker's text and the buttons stay; a success strips them and appends the outcome to the card."""
+        worker's text and the buttons stay; a success strips them and appends the outcome to the card.
+        A taste verb (SEC-125) is on a one-photo card: a success edits its caption, not its text, and
+        keeps the buttons, so a mis-tap is corrected by tapping again (the last tap wins)."""
         from plugins.platforms.telegram import deals_callbacks as _sd
         parsed = _sd.parse_callback(data)
         if parsed is None:
@@ -5013,6 +5018,9 @@ class TelegramAdapter(BasePlatformAdapter):
         if not answer.ok:
             await query.answer(text=answer.text[:200], show_alert=True)  # Bot API cap: 200 chars
             return
+        if verb in _sd.TASTE_ANSWERS:
+            await self._finish_taste_tap(query, verb, answer.text)
+            return
         label = self._SD_LABELS.get(answer.text, f"✔ {verb}: {answer.text}")
         await query.answer(text=label)
         message = query.message
@@ -5032,6 +5040,29 @@ class TelegramAdapter(BasePlatformAdapter):
                 await query.edit_message_reply_markup(reply_markup=None)
             except Exception as exc2:
                 logger.warning("[%s] deals button: removing buttons failed too: %s", self.name, exc2)
+
+    async def _finish_taste_tap(self, query, verb: str, status: str) -> None:
+        """SEC-125: toast the answer and rewrite the taste card's caption with it.
+
+        The card is a photo, so the edit is ``edit_message_caption`` (``edit_message_text`` fails on a photo
+        message). The caption is plain seller text, so no ``parse_mode``. Its first part is kept and a status
+        line this method wrote earlier is replaced, never stacked. The keyboard is re-sent explicitly because
+        an edit that omits ``reply_markup`` strips it, and the buttons must stay for the next tap."""
+        from plugins.platforms.telegram import deals_callbacks as _sd
+        label = self._SD_TASTE_LABELS.get(status, f"✔ {_sd.TASTE_ANSWERS[verb]}")
+        await query.answer(text=label)
+        message = query.message
+        caption = (getattr(message, "caption", None) or "") if message is not None else ""
+        head, sep, tail = caption.rpartition("\n\n— ")
+        if sep and tail.startswith(tuple(self._SD_TASTE_LABELS.values())):
+            caption = head  # our own status line from an earlier tap
+        by = getattr(query.from_user, "first_name", None) or "User"
+        try:
+            await query.edit_message_caption(
+                caption=f"{caption}\n\n— {label} by {by}",
+                reply_markup=getattr(message, "reply_markup", None))
+        except Exception as exc:  # the answer is saved either way; the toast already confirmed it
+            logger.warning("[%s] deals button: taste caption edit failed (%s); the answer was saved", self.name, exc)
 
     def _missing_media_path_error(self, label: str, path: str) -> str:
         """File-not-found error for MEDIA delivery; /workspace-style paths often exist only in the sandbox."""
