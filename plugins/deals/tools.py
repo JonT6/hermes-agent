@@ -98,8 +98,8 @@ def _turn_origin() -> Optional[tuple[str, str]]:
 _REPLY_TO_VAR = "HERMES_SESSION_REPLY_TO_MESSAGE_ID"
 _CARD_BOUND = ("approve", "post-now")  # worker commands that approve, or re-approve a held candidate
 NO_CARD_REFUSAL = ("Not approved: an approval through Cawl must answer the candidate's card. To approve, tap "
-                   "✅ Telegram or ✅ Telegram + Facebook on the candidate's current card, or reply 'approve' (Telegram) or "
-                   "'approve <id> tg+fb' (Telegram + Facebook) to that card. Nothing was changed.")
+                   "✅ Approve on the candidate's current card, or reply 'approve' to that card (Telegram, plus its "
+                   "Facebook post to paste by hand). Nothing was changed.")
 
 
 def _turn_card() -> tuple[Optional[int], Optional[str]]:
@@ -676,7 +676,7 @@ _APPROVE_PLACEMENTS = ("tg", "both")
 
 def _argv_approve(a: dict):
     """approve's argv: the id and note, plus ``--placement <tg|both>`` when the model names one (SEC-102);
-    left out, the worker's own default (``tg``) applies."""
+    left out, the worker's own default applies (``both`` since SEC-150)."""
     argv = _with_id("approve", ("note", "--note"))(a)
     if isinstance(argv, str) or a.get("placement") is None:
         return argv
@@ -747,15 +747,14 @@ _TOOL_SPECS = (
      "Approve a pending candidate so it joins the posting queue (the worker posts it as soon as its pacing allows), "
      "or re-approve a held one at its re-check's numbers. "
      "Only when Jonathan asks for it in a reply to the candidate's card: the approval is bound to that card, an "
-     "out-of-date card is refused, and a message that replies to no card is refused. Placement: a reply "
-     "'approve <id> tg+fb' means placement 'both' (Telegram, plus a Facebook version for Jonathan to post by "
-     "hand); a plain 'approve <id>' means leave placement out (Telegram only). 'tg' is the same as leaving "
-     "it out.",
+     "out-of-date card is refused, and a message that replies to no card is refused. Placement (SEC-150): "
+     "leave it out. Every approval posts to Telegram and sends a Facebook version for Jonathan to post by "
+     "hand. Pass 'tg' only when Jonathan explicitly says Telegram only.",
      {"id": _ID, "note": {"type": "string", "description": "Optional note stored with the approval."},
       "placement": {"type": "string", "enum": list(_APPROVE_PLACEMENTS),
-                    "description": "Optional: 'both' = Telegram plus a Facebook version for Jonathan to post "
-                                   "by hand (his reply says 'tg+fb'); 'tg' = Telegram only. Omit for a "
-                                   "plain approve."}},
+                    "description": "Optional, normally omitted (the default is 'both': Telegram plus a "
+                                   "Facebook version for Jonathan to post by hand). 'tg' = Telegram only, "
+                                   "only when Jonathan explicitly asks for that."}},
      ("id",), "approve a candidate", TIMEOUT_SECONDS, _answering_card(_argv_approve), _fmt_moved),
     ("deals_skip", "⏭️",
      "Skip a pending, approved or held candidate so it never posts. Only when Jonathan asks for it.",

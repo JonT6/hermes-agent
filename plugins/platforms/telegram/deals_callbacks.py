@@ -1,10 +1,10 @@
 """secret-deals card buttons (SEC-71, SEC-102, SEC-125): ``sd:approve:<id>``, ``sd:approve_both:<id>``,
 ``sd:skip:<id>``, and the taste-card verbs ``sd:taste_post:<id>``, ``sd:taste_never:<id>``, ``sd:taste_unsure:<id>``.
 
-The secret-deals worker posts each candidate card to the ops group as this bot, with three inline
-buttons: ✅ Telegram (``sd:approve``), ✅ Telegram + Facebook (``sd:approve_both``: approves with the
-worker's ``--placement both``, so a Facebook version is prepared for Jonathan to post by hand) and
-❌ (``sd:skip``). A tap runs the worker's own CLI the way the ``deals`` plugin (SEC-14) does: the venv's
+The secret-deals worker posts each candidate card to the ops group as this bot. Since SEC-150 a card
+has one ✅ Approve (``sd:approve_both``: approves with the worker's ``--placement both``, so a Facebook
+version is prepared for Jonathan to post by hand) and ❌ (``sd:skip``); ``sd:approve`` stays for older
+cards and now gets the worker's default, which is ``both`` too. A tap runs the worker's own CLI the way the ``deals`` plugin (SEC-14) does: the venv's
 ``bin/secret-deals <verb> <id> --json``, the worker dir as cwd, a bare environment, a hard timeout.
 The worker owns every rule (which status may be approved or skipped); this module only parses the
 button, runs the CLI and reads back the one JSON object it prints (contract: the secret-deals
