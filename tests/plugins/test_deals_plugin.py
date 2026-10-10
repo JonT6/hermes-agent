@@ -162,7 +162,7 @@ def test_no_card_id_refuses_an_approval_and_never_runs_the_worker(as_user, tool,
     result = json.loads(_tools(run)[tool]({"id": 41}))
     assert run.calls == []
     assert result["error"] == dt.NO_CARD_REFUSAL
-    assert "tap ✅ Telegram or ✅ Telegram + Facebook on the candidate's current card" in result["error"]
+    assert "tap ✅ Approve on the candidate's current card" in result["error"]
 
 
 def test_no_card_id_leaves_the_other_actions_alone(as_user):
@@ -191,10 +191,12 @@ def test_approve_placement_outside_tg_or_both_never_reaches_the_worker(as_user, 
 
 def test_the_approve_description_maps_the_typed_replies_to_placement():
     """Typed replies reach the model, not a parser (nothing in the plugin or gateway reads them), so the
-    tool description is what maps ``approve <id> tg+fb`` to placement both and plain approve to none."""
+    tool description is what keeps a plain approve on the worker's default (SEC-150: ``both``) and ``tg``
+    for an explicit Telegram-only ask."""
     schema = {n: s for n, s, _h, _e in dt.build_tools(SETTINGS.get)}["deals_approve"]
-    assert "'approve <id> tg+fb' means placement 'both'" in schema["description"]
-    assert "plain 'approve <id>' means leave placement out" in schema["description"]
+    assert "Placement (SEC-150): leave it out" in schema["description"]
+    assert "Pass 'tg' only when Jonathan explicitly says Telegram only" in schema["description"]
+    assert "tg+fb" not in schema["description"]
 
 
 def test_approve_placement_is_an_optional_enum_in_the_schema():
