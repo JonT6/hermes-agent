@@ -121,7 +121,7 @@ async def run_worker(verb: str, candidate_id: int, settings: Mapping[str, Any],
     try:
         proc = await asyncio.create_subprocess_exec(
             str(script), *argv,
-            cwd=str(workdir), env=_child_env(),
+            cwd=str(workdir), env=_child_env(), stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     except OSError as exc:
         logger.warning("deals button: cannot start worker %s: %s", script, exc)
