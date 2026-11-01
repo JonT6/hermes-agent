@@ -112,6 +112,54 @@ class TestMalformed:
         assert sd.parse_callback(data) == want
 
 
+SKIP_REASON_VERBS = [("skip_forced", "reason:forced"), ("skip_item", "reason:item"),
+                     ("skip_dull", "reason:dull"), ("skip_price", "reason:price")]
+
+
+class TestReasonedSkip:
+    """SEC-186: ``sd:skip_<reason>:<id>`` is ``skip`` plus ``--reason reason:<reason>``."""
+
+    @pytest.mark.parametrize("verb, reason", SKIP_REASON_VERBS)
+    def test_parsed(self, verb, reason):
+        assert sd.parse_callback(f"sd:{verb}:7") == (verb, 7)
+        assert sd.SKIP_REASONS[verb] == reason
+
+    @pytest.mark.parametrize("data", [
+        "sd:skip_forced:", "sd:skip_forced:1x", "sd:skip_item:-1", "sd:skip_dull:5\n", "sd:skip_price:٥",
+        "sd:skip_other:5", "sd:skip_:5", "sd:skip_forcedx:5", "sd:SKIP_FORCED:5", "sd:skip_item:5:6"])
+    def test_malformed_is_rejected(self, data):
+        assert sd.parse_callback(data) is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verb, reason", SKIP_REASON_VERBS)
+    async def test_tap_runs_the_worker_verb_unbound_to_a_card(self, verb, reason):
+        run = await _tap(_query(f"sd:{verb}:5"), answer=sd.WorkerAnswer(True, "skipped"))
+        run.assert_awaited_once_with(verb, 5, SETTINGS, card=None)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verb, reason", SKIP_REASON_VERBS)
+    async def test_success_reads_like_a_plain_skip(self, verb, reason):
+        query = _query(f"sd:{verb}:5")
+        await _tap(query, answer=sd.WorkerAnswer(True, "skipped"))
+        assert _answer_text(query) == "❌ Skipped"
+        kwargs = query.edit_message_text.call_args.kwargs
+        assert kwargs["reply_markup"] is None
+        assert kwargs["text"] == f"{CARD_HTML}\n\n— ❌ Skipped by Jonathan"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verb, reason", SKIP_REASON_VERBS)
+    async def test_run_worker_argv_carries_the_reason(self, tmp_path, verb, reason):
+        settings, workdir = _fake_worker(tmp_path, "echo '{\"ok\": true, \"id\": 5, \"status\": \"skipped\"}'")
+        assert await sd.run_worker(verb, 5, settings) == sd.WorkerAnswer(True, "skipped")
+        assert (workdir / "argv").read_text().strip() == f"skip 5 --reason {reason} --json"
+
+    @pytest.mark.asyncio
+    async def test_plain_skip_is_unchanged(self, tmp_path):
+        settings, workdir = _fake_worker(tmp_path, "echo '{\"ok\": true, \"id\": 5, \"status\": \"skipped\"}'")
+        await sd.run_worker("skip", 5, settings)
+        assert (workdir / "argv").read_text().strip() == "skip 5 --json"
+
+
 class TestAuth:
     @pytest.mark.asyncio
     async def test_non_owner_is_refused(self):

@@ -4967,8 +4967,9 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
     _SD_TASTE_LABELS = {"post": "👍 Would post", "never": "👎 Never", "unsure": "🤷 Not sure"}
 
     async def _handle_deals_callback(self, query, data: str, cb: Dict[str, Any]) -> None:
-        """``sd:<approve|approve_both|skip|taste_post|taste_never|taste_unsure>:<id>`` — a secret-deals card
-        button (SEC-71, SEC-102, SEC-125).
+        """``sd:<approve|approve_both|skip|skip_forced|skip_item|skip_dull|skip_price|taste_post|taste_never|
+        taste_unsure>:<id>`` — a secret-deals card button (SEC-71, SEC-102, SEC-125, SEC-186). A reasoned skip
+        is answered and edited exactly like ``skip``: the worker's status is ``skipped``.
 
         Runs the worker CLI; only the deals plugin's ``allowed_user_id`` may act, and only if the
         callback allowlist also admits them. SEC-44: an approval names the card the button is on

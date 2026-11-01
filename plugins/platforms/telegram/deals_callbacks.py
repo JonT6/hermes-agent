@@ -1,5 +1,6 @@
 """secret-deals card buttons (SEC-71, SEC-102, SEC-125): ``sd:approve:<id>``, ``sd:approve_both:<id>``,
-``sd:skip:<id>``, and the taste-card verbs ``sd:taste_post:<id>``, ``sd:taste_never:<id>``, ``sd:taste_unsure:<id>``.
+``sd:skip:<id>``, the reasoned skips ``sd:skip_forced|skip_item|skip_dull|skip_price:<id>`` (SEC-186),
+and the taste-card verbs ``sd:taste_post:<id>``, ``sd:taste_never:<id>``, ``sd:taste_unsure:<id>``.
 
 The secret-deals worker posts each candidate card to the ops group as this bot. Since SEC-150 a card
 has one ✅ Approve (``sd:approve_both``: approves with the worker's ``--placement both``, so a Facebook
@@ -40,7 +41,13 @@ TIMEOUT_SECONDS = 30  # the deals plugin's approve/skip timeout
 _STDERR_LOG_CHARS = 2000
 
 # [0-9], not \d: \d also matches non-ASCII digits. fullmatch, not $: $ allows a trailing newline.
-_DATA_RE = re.compile(r"sd:(approve|approve_both|skip|taste_post|taste_never|taste_unsure):([0-9]+)")
+_DATA_RE = re.compile(
+    r"sd:(approve|approve_both|skip|skip_forced|skip_item|skip_dull|skip_price"
+    r"|taste_post|taste_never|taste_unsure):([0-9]+)")
+
+# SEC-186: a reasoned skip runs the plain ``skip <id> --reason <reason> --json``.
+SKIP_REASONS = {"skip_forced": "reason:forced", "skip_item": "reason:item",
+                "skip_dull": "reason:dull", "skip_price": "reason:price"}
 
 # SEC-125: the taste verbs and the worker answer each one records (``taste answer <ask_id> <answer>``).
 TASTE_ANSWERS = {"taste_post": "post", "taste_never": "never", "taste_unsure": "unsure"}
@@ -56,7 +63,7 @@ class WorkerAnswer:
 
 def parse_callback(data: str) -> Optional[tuple[str, int]]:
     """``(verb, id)`` for exactly ``sd:<verb>:<digits>`` with verb one of ``approve``, ``approve_both``,
-    ``skip`` (a candidate id) or ``taste_post``, ``taste_never``, ``taste_unsure`` (a taste ask id), else None."""
+    ``skip``, ``skip_forced``, ``skip_item``, ``skip_dull``, ``skip_price`` (a candidate id) or ``taste_post``, ``taste_never``, ``taste_unsure`` (a taste ask id), else None."""
     match = _DATA_RE.fullmatch(data or "")
     return (match.group(1), int(match.group(2))) if match else None
 
@@ -100,6 +107,8 @@ async def run_worker(verb: str, candidate_id: int, settings: Mapping[str, Any],
     """Run ``secret-deals <verb> <candidate_id> [--card=<card>] --json`` and read its answer.
 
     Verb ``approve_both`` (SEC-102) runs the worker's ``approve <id> --placement both --card=<card> --json``.
+    A reasoned skip (SEC-186: ``skip_forced|skip_item|skip_dull|skip_price``) runs
+    ``skip <id> --reason reason:forced|item|dull|price --json``; it is bound to no card, like ``skip``.
     A taste verb (SEC-125) runs ``taste answer <id> post|never|unsure --json``: the id is a taste ask's, and
     there is no ``--card``, because a tap names its ask and the last tap wins.
     ``card`` (SEC-44) is the message the tapped button is on: an approval applies only while that is
@@ -113,8 +122,11 @@ async def run_worker(verb: str, candidate_id: int, settings: Mapping[str, Any],
                                    "worker_python and worker_dir. Nothing was changed.")
     script = Path(str(python)).parent / "secret-deals"  # the venv's console script, as launchd runs it
     taste = verb in TASTE_ANSWERS
+    skip_reason = SKIP_REASONS.get(verb)
     if taste:
         argv = ["taste", "answer", str(candidate_id), TASTE_ANSWERS[verb], "--json"]
+    elif skip_reason:
+        argv = ["skip", str(candidate_id), "--reason", skip_reason, "--json"]
     else:
         command, placement = ("approve", ["--placement", "both"]) if verb == "approve_both" else (verb, [])
         argv = [command, str(candidate_id), *placement, *([] if card is None else [f"--card={card}"]), "--json"]
