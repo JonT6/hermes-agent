@@ -41,9 +41,8 @@ TIMEOUT_SECONDS = 30  # the deals plugin's approve/skip timeout
 _STDERR_LOG_CHARS = 2000
 
 # [0-9], not \d: \d also matches non-ASCII digits. fullmatch, not $: $ allows a trailing newline.
-_DATA_RE = re.compile(
-    r"sd:(approve|approve_both|skip|skip_forced|skip_item|skip_dull|skip_price"
-    r"|taste_post|taste_never|taste_unsure):([0-9]+)")
+# One literal on ONE line: the worker's check-cawl reads this source for `sd:(<verbs>):` (SEC-80/125/186).
+_DATA_RE = re.compile(r"sd:(approve|approve_both|skip|skip_forced|skip_item|skip_dull|skip_price|taste_post|taste_never|taste_unsure):([0-9]+)")  # noqa: E501
 
 # SEC-186: a reasoned skip runs the plain ``skip <id> --reason <reason> --json``.
 SKIP_REASONS = {"skip_forced": "reason:forced", "skip_item": "reason:item",
