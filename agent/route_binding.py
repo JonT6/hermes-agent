@@ -69,7 +69,7 @@ def bind_route_entry(agent: Any, entry: dict[str, Any], provider: str, model: st
     agent._reasoning_echo_flag = bool(entry.get("reasoning_echo", False))
     if hasattr(agent, "_transport_cache"):
         agent._transport_cache.clear()
-    from agent.turn_recovery import reset_codex_reasoning_replay
+    from agent.turn_recovery_codex import reset_codex_reasoning_replay
     reset_codex_reasoning_replay(agent)
     agent._fallback_activated = True
 
@@ -101,7 +101,7 @@ def reinstall_runtime_snapshot(agent: Any, rt: dict[str, Any]) -> None:
         _apply_primary_runtime_fields, _rebuild_primary_client, _restore_runtime_capabilities,
     )
     _apply_primary_runtime_fields(agent, rt)
-    from agent.turn_recovery import reset_codex_reasoning_replay
+    from agent.turn_recovery_codex import reset_codex_reasoning_replay
     reset_codex_reasoning_replay(agent)
     _restore_runtime_capabilities(agent, rt)
     agent._use_prompt_caching = rt["use_prompt_caching"]
@@ -122,7 +122,7 @@ def reinstall_runtime_snapshot(agent: Any, rt: dict[str, Any]) -> None:
     )
     # Same rule as fallback activation: refresh an existing verdict only; never-probed sessions stay lazy.
     if getattr(agent, "_compression_feasibility_checked", False) is True:
-        from agent.conversation_compression import revalidate_compression_feasibility
+        from agent.conversation_compression_feasibility import revalidate_compression_feasibility
         revalidate_compression_feasibility(agent)
     # Older snapshots have no reasoning_config; keep the current value.
     saved_reasoning = rt.get("reasoning_config")
