@@ -1,6 +1,7 @@
 """secret-deals card buttons (SEC-71, SEC-102, SEC-125): ``sd:approve:<id>``, ``sd:approve_both:<id>``,
 ``sd:skip:<id>``, the reasoned skips ``sd:skip_forced|skip_item|skip_dull|skip_price:<id>`` (SEC-186),
-and the taste-card verbs ``sd:taste_post:<id>``, ``sd:taste_never:<id>``, ``sd:taste_unsure:<id>``.
+the compact card's ``sd:details:<id>`` (SEC-185), and the taste-card verbs ``sd:taste_post:<id>``,
+``sd:taste_never:<id>``, ``sd:taste_unsure:<id>``.
 
 The secret-deals worker posts each candidate card to the ops group as this bot. Since SEC-150 a card
 has one ✅ Approve (``sd:approve_both``: approves with the worker's ``--placement both``, so a Facebook
@@ -10,6 +11,9 @@ cards and now gets the worker's default, which is ``both`` too. A tap runs the w
 The worker owns every rule (which status may be approved or skipped); this module only parses the
 button, runs the CLI and reads back the one JSON object it prints (contract: the secret-deals
 repo's ``docs/cawl-contract.md``). Never the SQLite store directly.
+
+SEC-185: ``sd:details:<id>`` runs ``details <id> --card=<tapped card> --json``. The worker sends the Details
+message itself, as a reply to that card; Cawl sends nothing and only answers the tap.
 
 SEC-125: the daily taste batch posts one-photo cards to the Ops group's Taste topic with 👍 / 👎 / 🤷. Those
 three verbs carry a taste *ask* id (not a candidate id) and run the worker's ``taste answer <ask_id>
@@ -41,8 +45,8 @@ TIMEOUT_SECONDS = 30  # the deals plugin's approve/skip timeout
 _STDERR_LOG_CHARS = 2000
 
 # [0-9], not \d: \d also matches non-ASCII digits. fullmatch, not $: $ allows a trailing newline.
-# One literal on ONE line: the worker's check-cawl reads this source for `sd:(<verbs>):` (SEC-80/125/186).
-_DATA_RE = re.compile(r"sd:(approve|approve_both|skip|skip_forced|skip_item|skip_dull|skip_price|taste_post|taste_never|taste_unsure):([0-9]+)")  # noqa: E501
+# One literal on ONE line: the worker's check-cawl reads this source for `sd:(<verbs>):` (SEC-80/125/186/185).
+_DATA_RE = re.compile(r"sd:(approve|approve_both|skip|skip_forced|skip_item|skip_dull|skip_price|details|taste_post|taste_never|taste_unsure):([0-9]+)")  # noqa: E501
 
 # SEC-186: a reasoned skip runs the plain ``skip <id> --reason <reason> --json``.
 SKIP_REASONS = {"skip_forced": "reason:forced", "skip_item": "reason:item",
@@ -62,7 +66,7 @@ class WorkerAnswer:
 
 def parse_callback(data: str) -> Optional[tuple[str, int]]:
     """``(verb, id)`` for exactly ``sd:<verb>:<digits>`` with verb one of ``approve``, ``approve_both``,
-    ``skip``, ``skip_forced``, ``skip_item``, ``skip_dull``, ``skip_price`` (a candidate id) or ``taste_post``, ``taste_never``, ``taste_unsure`` (a taste ask id), else None."""
+    ``skip``, ``skip_forced``, ``skip_item``, ``skip_dull``, ``skip_price``, ``details`` (a candidate id) or ``taste_post``, ``taste_never``, ``taste_unsure`` (a taste ask id), else None."""
     match = _DATA_RE.fullmatch(data or "")
     return (match.group(1), int(match.group(2))) if match else None
 
@@ -110,6 +114,9 @@ async def run_worker(verb: str, candidate_id: int, settings: Mapping[str, Any],
     ``skip <id> --reason reason:forced|item|dull|price --json``; it is bound to no card, like ``skip``.
     A taste verb (SEC-125) runs ``taste answer <id> post|never|unsure --json``: the id is a taste ask's, and
     there is no ``--card``, because a tap names its ask and the last tap wins.
+    Verb ``details`` (SEC-185) runs ``details <id> --card=<card> --json``; the caller always passes the
+    tapped card, and the worker replies under it. Success is ``status: "sent"``; nothing about the
+    candidate changes, so its timeout text says so.
     ``card`` (SEC-44) is the message the tapped button is on: an approval applies only while that is
     still the candidate's current card. A ``stale_card`` refusal comes back as fixed text naming the
     newer card; any other refusal (``ok: false``) as the worker's own ``detail``, which the contract builds
@@ -143,6 +150,10 @@ async def run_worker(verb: str, candidate_id: int, settings: Mapping[str, Any],
         proc.kill()
         await proc.wait()
         logger.warning("deals button: worker %s %s timed out after %ss", verb, candidate_id, timeout)
+        if verb == "details":
+            return WorkerAnswer(False, f"The worker did not answer within {timeout:g}s. Whether the Details "
+                                       f"message for candidate {candidate_id} was sent is unknown: look under "
+                                       "the card, and tap ℹ️ Details again if it is not there.")
         subject = f"taste card {candidate_id} was answered" if taste else f"candidate {candidate_id} changed"
         return WorkerAnswer(False, f"The worker did not answer within {timeout:g}s. Whether {subject} is unknown: "
                                    + ("tap again to be sure." if taste else "ask Cawl for its status before retrying."))
