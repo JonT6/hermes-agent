@@ -135,7 +135,7 @@ Choose the highest (least-footprint) rung that correctly solves the problem:
    core-schema footprint, reusable by any MCP host, reached via the built-in MCP client.
 6. **New core tool** — only when fundamental, broadly useful to nearly every user, and
    unreachable via terminal + file or an MCP server (terminal, read_file, web_search,
-   browser_navigate).
+   browser_exec).
 
 ## Common contribution paths
 
@@ -153,6 +153,7 @@ Choose the highest (least-footprint) rung that correctly solves the problem:
 | **Git**              | With the `git-lfs` extension installed                                                        |
 | **Python 3.14** | Current development uses PM's pinned interpreter. The broader `>=3.11,<3.15` package metadata keeps old updaters working, not the current runtime on older Python. |
 | **Node.js** | Use the PM pin or a version accepted by root `package.json` engines |
+| **pnpm** | Exactly the root `package.json` `devEngines` pin; `source ./activate` provides it |
 
 ### PM developer environment
 
@@ -223,15 +224,19 @@ than copying production credentials into the checkout.
 
 ### JavaScript workspaces and website
 
-From the repository root, run `npm ci` for the desktop, TUI, dashboard, and
-shared JS workspaces. The website is separate:
+From the repository root, run `pnpm install --frozen-lockfile` for the desktop,
+TUI, dashboard, and shared JS workspaces. Root `package.json` pins pnpm in
+`devEngines` (`source ./activate` provides that exact version). Hermes's builds and
+`hermes update` refuse any other pnpm version; a direct `pnpm install` does not check
+it. The root `preinstall` script refuses `npm install`. The website is a separate npm
+project:
 
 ```bash
 npm ci --prefix website
 npm run build:fast --prefix website
 ```
 
-Use a Node/npm version accepted by the corresponding `package.json` engines.
+Use a Node version accepted by the corresponding `package.json` engines.
 Native desktop dependencies can also require the platform build toolchain.
 
 Logos and icons are generated from `assets/nous-girl-*.svg` and
@@ -351,6 +356,8 @@ refactor/description   # Code restructuring
 2. **Test manually**: Run `hermes` and exercise the code path you changed
 3. **Check cross-platform impact**: Consider macOS, Linux, WSL2, and native Windows. If you touch file I/O, process management, terminal handling, subprocesses, or signals, run `scripts/check-windows-footguns.py`.
 4. **Keep PRs focused**: One logical change per PR
+5. **Prompt or tool-schema changes**: if `tests/ci/test_prompt_surface.py` fails, your change alters the system prompt or a tool schema that every session sends. Regenerate with `scripts/run-in-hermes-env python scripts/ci/prompt_surface.py render` and commit the snapshot. Changes there need a maintainer approval (see [Prompt Assembly](./prompt-assembly.md#reviewing-changes-to-the-prompt-surface)).
+6. **New config keys or slash commands**: if `tests/ci/test_docs_drift.py` fails, a `DEFAULT_CONFIG` key or slash command you added has no docs. Mention the dotted key (`agent.max_turns`) or show it in a YAML example under `website/docs/` (usually `user-guide/configuration.md`), and add slash commands to `reference/slash-commands.md`. If a key really should stay undocumented, `python scripts/ci/check_docs_drift.py --update` adds it to `scripts/ci/docs_drift_baseline.json` where reviewers see it. Keys that were undocumented when the check landed are already baselined; documenting one never fails.
 
 ### PR Description
 
