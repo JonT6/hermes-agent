@@ -1,9 +1,11 @@
 """SEC-71: the secret-deals candidate card buttons, ``sd:approve:<id>`` / ``sd:skip:<id>``.
 
-SEC-125 adds the taste-card verbs ``sd:taste_post|taste_never|taste_unsure:<id>`` (classes at the end)."""
+SEC-125 adds the taste-card verbs ``sd:taste_post|taste_never|taste_unsure:<id>`` (classes at the end).
+SEC-185 adds ``sd:details:<id>``, the compact card's ℹ️ Details button (last class)."""
 
 import json
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -469,3 +471,83 @@ class TestRunWorkerTaste:
         answer = await sd.run_worker("taste_post", 7, settings, timeout=0.3)
         assert not answer.ok and "unknown" in answer.text and "taste card 7" in answer.text
         assert "candidate" not in answer.text
+
+
+# --- SEC-185: ``sd:details:<id>``, the compact card's ℹ️ Details button --------------------------------
+
+DETAILS_SENT = {"ok": True, "id": 5, "status": "sent", "message_id": 9001, "reply_to": CARD_ID}
+
+
+class TestDetails:
+    """The worker sends the Details message itself, as a reply to the card. Cawl only toasts: it sends
+    nothing, edits nothing, and the card keeps its keyboard so Approve is still there."""
+
+    @pytest.mark.parametrize("data, want", [
+        ("sd:details:5", ("details", 5)), ("sd:details:0012", ("details", 12)), ("sd:details:", None),
+        ("sd:details:1x", None), ("sd:detailsx:5", None), ("sd:DETAILS:5", None), ("sd:details:٥", None),
+        ("sd:details:5\n", None), ("sd:detail:5", None), ("sd:details:5:6", None)])
+    def test_parse_callback(self, data, want):
+        assert sd.parse_callback(data) == want
+
+    def test_the_regex_names_details_on_the_one_line_check_cawl_reads(self):
+        """secret-deals check-cawl finds the verb with a lookahead on the ``sd:(...)`` source line."""
+        import inspect
+        lines = [ln for ln in inspect.getsource(sd).splitlines() if ln.startswith("_DATA_RE = ")]
+        assert len(lines) == 1
+        assert re.search(r"sd:\((?=[^)]*\bdetails\b)", lines[0])
+
+    @pytest.mark.asyncio
+    async def test_tap_runs_the_worker_bound_to_the_tapped_card(self):
+        run = await _tap(_query("sd:details:5"), answer=sd.WorkerAnswer(True, "sent"))
+        run.assert_awaited_once_with("details", 5, SETTINGS, card=CARD_ID)
+
+    @pytest.mark.asyncio
+    async def test_run_worker_argv_always_names_the_card(self, tmp_path):
+        settings, workdir = _fake_worker(tmp_path, f"echo '{json.dumps(DETAILS_SENT)}'")
+        assert await sd.run_worker("details", 5, settings, card=CARD_ID) == sd.WorkerAnswer(True, "sent")
+        assert (workdir / "argv").read_text().strip() == f"details 5 --card={CARD_ID} --json"
+
+    @pytest.mark.asyncio
+    async def test_success_only_toasts(self):
+        query = _query("sd:details:5")
+        adapter = _adapter()
+        update = MagicMock()
+        update.callback_query = query
+        with patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": "*"}), \
+                patch.object(sd, "deals_settings", return_value=SETTINGS), \
+                patch.object(sd, "run_worker", AsyncMock(return_value=sd.WorkerAnswer(True, "sent"))):
+            await adapter._handle_callback_query(update, MagicMock())
+        assert _answer_text(query) == "ℹ️ Details sent below"
+        assert [c[0] for c in query.method_calls] == ["answer"]  # no text, caption or keyboard edit
+        assert adapter._bot.method_calls == []  # SEC-76: Cawl sends nothing anywhere
+
+    @pytest.mark.asyncio
+    async def test_refusal_is_a_visible_toast_and_the_card_is_untouched(self):
+        query = _query("sd:details:5")
+        await _tap(query, answer=sd.WorkerAnswer(False, "candidate 5 has no checked draft"))
+        assert _answer_text(query) == "candidate 5 has no checked draft"
+        assert query.answer.call_args.kwargs["show_alert"] is True
+        assert [c[0] for c in query.method_calls] == ["answer"]
+
+    @pytest.mark.asyncio
+    async def test_non_owner_is_refused(self):
+        query = _query("sd:details:5", user_id="222")
+        run = await _tap(query)
+        run.assert_not_awaited()
+        assert _answer_text(query) == unauthorized_action_notice("telegram")
+        assert [c[0] for c in query.method_calls] == ["answer"]
+
+    @pytest.mark.asyncio
+    async def test_no_card_message_id_runs_nothing(self):
+        query = _query("sd:details:5")
+        query.message.message_id = None
+        run = await _tap(query)
+        run.assert_not_awaited()
+        assert "Nothing was changed" in _answer_text(query)
+
+    @pytest.mark.asyncio
+    async def test_timeout_does_not_say_the_candidate_may_have_changed(self, tmp_path):
+        settings, _ = _fake_worker(tmp_path, "exec sleep 5")
+        answer = await sd.run_worker("details", 5, settings, card=CARD_ID, timeout=0.3)
+        assert not answer.ok and "unknown" in answer.text and "Details" in answer.text
+        assert "changed" not in answer.text and len(answer.text) <= 200

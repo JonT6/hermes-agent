@@ -4967,8 +4967,9 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
     _SD_TASTE_LABELS = {"post": "👍 Would post", "never": "👎 Never", "unsure": "🤷 Not sure"}
 
     async def _handle_deals_callback(self, query, data: str, cb: Dict[str, Any]) -> None:
-        """``sd:<approve|approve_both|skip|skip_forced|skip_item|skip_dull|skip_price|taste_post|taste_never|
-        taste_unsure>:<id>`` — a secret-deals card button (SEC-71, SEC-102, SEC-125, SEC-186). A reasoned skip
+        """``sd:<approve|approve_both|skip|skip_forced|skip_item|skip_dull|skip_price|details|taste_post|
+        taste_never|taste_unsure>:<id>`` — a secret-deals card button (SEC-71, SEC-102, SEC-125, SEC-186,
+        SEC-185). A reasoned skip
         is answered and edited exactly like ``skip``: the worker's status is ``skipped``.
 
         Runs the worker CLI; only the deals plugin's ``allowed_user_id`` may act, and only if the
@@ -4976,7 +4977,10 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         (``--card``), so a tap on an out-of-date card is refused. A refusal is answered with the
         worker's text and the buttons stay; a success strips them and appends the outcome to the card.
         A taste verb (SEC-125) is on a one-photo card: a success edits its caption, not its text, and
-        keeps the buttons, so a mis-tap is corrected by tapping again (the last tap wins)."""
+        keeps the buttons, so a mis-tap is corrected by tapping again (the last tap wins).
+        ``details`` (SEC-185) names the tapped card too; the worker sends the Details message as a reply to
+        it. A success here is only a toast: the card is not edited and keeps its buttons, so Approve stays,
+        and Cawl sends nothing."""
         from plugins.platforms.telegram import deals_callbacks as _sd
         parsed = _sd.parse_callback(data)
         if parsed is None:
@@ -4995,15 +4999,20 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
             await query.answer(text=_unauthorized())
             return
         approves = verb in ("approve", "approve_both")
-        card = getattr(query.message, "message_id", None) if approves else None
-        if approves and (not isinstance(card, int) or isinstance(card, bool)):
-            await query.answer(text="Cannot tell which card this button is on, so the approval cannot be bound to "
-                                    "it. Nothing was changed.", show_alert=True)
+        bound = approves or verb == "details"
+        card = getattr(query.message, "message_id", None) if bound else None
+        if bound and (not isinstance(card, int) or isinstance(card, bool)):
+            what = "the approval cannot be bound to it" if approves else "Details cannot be sent under it"
+            await query.answer(text=f"Cannot tell which card this button is on, so {what}. Nothing was changed.",
+                               show_alert=True)
             return
         answer = await _sd.run_worker(verb, candidate_id, settings, card=card)
         logger.info("[%s] deals button: %s %s -> ok=%s %s", self.name, verb, candidate_id, answer.ok, answer.text)
         if not answer.ok:
             await query.answer(text=answer.text[:200], show_alert=True)  # Bot API cap: 200 chars
+            return
+        if verb == "details":  # SEC-185: the worker sent it; editing the card would strip Approve
+            await query.answer(text="ℹ️ Details sent below")
             return
         if verb in _sd.TASTE_ANSWERS:
             await self._finish_taste_tap(query, verb, answer.text)
