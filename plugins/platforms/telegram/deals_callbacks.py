@@ -18,8 +18,9 @@ message itself, as a reply to that card; Cawl sends nothing and only answers the
 the photo on the post preview above the card and the button's ``k/n`` itself; Cawl only answers the tap.
 SEC-185 item 3, the daily digest: ``sd:open:<id>`` (a ``#id`` button) runs ``open <id> --digest=<tapped digest>
 --json``, and the worker sends that candidate's preview + card under the digest. ``sd:approve_pass:<digest_id>`` runs
-``digest approve <digest_id> --message=<tapped digest> --json``: the worker approves every candidate on that digest
-that still passes the thresholds, through its normal approve path, and edits the digest itself. Both only toast here.
+``digest approve <digest_id> --message=<tapped digest> --json``: the worker re-checks the ones the digest listed as
+passing and approves those that still pass, through its normal approve path, and edits the digest itself. Both only
+toast here (``already_approved``: "Already approved earlier"; ``approved: []``: "Nothing passes now").
 
 SEC-125: the daily taste batch posts one-photo cards to the Ops group's Taste topic with 👍 / 👎 / 🤷. Those
 three verbs carry a taste *ask* id (not a candidate id) and run the worker's ``taste answer <ask_id>
@@ -195,6 +196,8 @@ async def run_worker(verb: str, candidate_id: int, settings: Mapping[str, Any],
     if payload["ok"]:
         if verb == "photo" and isinstance(payload.get("position"), int) and isinstance(payload.get("count"), int):
             return WorkerAnswer(True, f"{payload['position']}/{payload['count']}")
+        if verb == "approve_pass" and payload.get("status") == "already_approved":  # a second tap: nothing approved now
+            return WorkerAnswer(True, "already_approved")
         if verb == "approve_pass" and isinstance(payload.get("approved"), list):
             return WorkerAnswer(True, str(len(payload["approved"])))
         return WorkerAnswer(True, str(payload.get("status") or ""))

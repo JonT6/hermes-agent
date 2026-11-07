@@ -667,6 +667,18 @@ class TestDigest:
         assert (workdir / "argv").read_text().strip() == f"digest approve 3 --message={CARD_ID} --json"
 
     @pytest.mark.asyncio
+    async def test_approve_pass_a_second_tap_is_already_approved_not_zero(self, tmp_path):
+        out = {"ok": True, "id": 3, "status": "already_approved", "approved": [], "skipped": {}, "approved_before": [701]}
+        settings, _ = _fake_worker(tmp_path, f"echo '{json.dumps(out)}'")
+        assert await sd.run_worker("approve_pass", 3, settings, card=CARD_ID) == sd.WorkerAnswer(True, "already_approved")
+
+    @pytest.mark.asyncio
+    async def test_approve_pass_a_first_tap_that_approved_nothing_is_zero(self, tmp_path):
+        out = {"ok": True, "id": 3, "status": "approved", "approved": [], "skipped": {"702": ["sold < 100"]}}
+        settings, _ = _fake_worker(tmp_path, f"echo '{json.dumps(out)}'")
+        assert await sd.run_worker("approve_pass", 3, settings, card=CARD_ID) == sd.WorkerAnswer(True, "0")
+
+    @pytest.mark.asyncio
     async def test_stale_digest_has_its_own_text(self, tmp_path):
         out = {"ok": False, "error": "stale_card", "detail": "x"}
         settings, _ = _fake_worker(tmp_path, f"echo '{json.dumps(out)}'")
@@ -677,6 +689,8 @@ class TestDigest:
     @pytest.mark.parametrize("data, worker, toast", [
         ("sd:open:701", "sent", "🗳️ Card #701 sent below"),
         ("sd:approve_pass:3", "2", "✅ Approved 2"),
+        ("sd:approve_pass:3", "already_approved", "Already approved earlier: nothing new to approve"),
+        ("sd:approve_pass:3", "0", "Nothing passes now: nothing was approved"),
     ])
     async def test_success_only_toasts(self, data, worker, toast):
         query = _query(data)

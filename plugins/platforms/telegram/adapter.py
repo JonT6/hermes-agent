@@ -5055,7 +5055,13 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
             await query.answer(text=f"🗳️ Card #{candidate_id} sent below")
             return
         if verb == "approve_pass":  # SEC-185 item 3: the worker approved and edited the digest itself
-            await query.answer(text=f"✅ Approved {answer.text}" if answer.text.isdigit() else "✅ Approved")
+            if answer.text == "already_approved":
+                text = "Already approved earlier: nothing new to approve"
+            elif answer.text == "0":
+                text = "Nothing passes now: nothing was approved"
+            else:
+                text = f"✅ Approved {answer.text}" if answer.text.isdigit() else "✅ Approved"
+            await query.answer(text=text)
             return
         if verb in _sd.TASTE_ANSWERS:
             await self._finish_taste_tap(query, verb, answer.text)
