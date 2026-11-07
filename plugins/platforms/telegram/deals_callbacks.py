@@ -1,6 +1,6 @@
 """secret-deals card buttons (SEC-71, SEC-102, SEC-125): ``sd:approve:<id>``, ``sd:approve_both:<id>``,
 ``sd:skip:<id>``, the reasoned skips ``sd:skip_forced|skip_item|skip_dull|skip_price:<id>`` (SEC-186),
-the compact card's ``sd:details:<id>`` (SEC-185), and the taste-card verbs ``sd:taste_post:<id>``,
+the compact card's ``sd:details:<id>`` and ``sd:photo:<id>`` (SEC-185), and the taste-card verbs ``sd:taste_post:<id>``,
 ``sd:taste_never:<id>``, ``sd:taste_unsure:<id>``.
 
 The secret-deals worker posts each candidate card to the ops group as this bot. Since SEC-150 a card
@@ -14,6 +14,8 @@ repo's ``docs/cawl-contract.md``). Never the SQLite store directly.
 
 SEC-185: ``sd:details:<id>`` runs ``details <id> --card=<tapped card> --json``. The worker sends the Details
 message itself, as a reply to that card; Cawl sends nothing and only answers the tap.
+``sd:photo:<id>`` (SEC-185 item 2, Next photo) runs ``photo <id> --card=<tapped card> --json``. The worker swaps
+the photo on the post preview above the card and the button's ``k/n`` itself; Cawl only answers the tap.
 
 SEC-125: the daily taste batch posts one-photo cards to the Ops group's Taste topic with 👍 / 👎 / 🤷. Those
 three verbs carry a taste *ask* id (not a candidate id) and run the worker's ``taste answer <ask_id>
@@ -46,7 +48,7 @@ _STDERR_LOG_CHARS = 2000
 
 # [0-9], not \d: \d also matches non-ASCII digits. fullmatch, not $: $ allows a trailing newline.
 # One literal on ONE line: the worker's check-cawl reads this source for `sd:(<verbs>):` (SEC-80/125/186/185).
-_DATA_RE = re.compile(r"sd:(approve|approve_both|skip|skip_forced|skip_item|skip_dull|skip_price|details|taste_post|taste_never|taste_unsure):([0-9]+)")  # noqa: E501
+_DATA_RE = re.compile(r"sd:(approve|approve_both|skip|skip_forced|skip_item|skip_dull|skip_price|details|photo|taste_post|taste_never|taste_unsure):([0-9]+)")  # noqa: E501
 
 # SEC-186: a reasoned skip runs the plain ``skip <id> --reason <reason> --json``.
 SKIP_REASONS = {"skip_forced": "reason:forced", "skip_item": "reason:item",
@@ -66,7 +68,7 @@ class WorkerAnswer:
 
 def parse_callback(data: str) -> Optional[tuple[str, int]]:
     """``(verb, id)`` for exactly ``sd:<verb>:<digits>`` with verb one of ``approve``, ``approve_both``,
-    ``skip``, ``skip_forced``, ``skip_item``, ``skip_dull``, ``skip_price``, ``details`` (a candidate id) or ``taste_post``, ``taste_never``, ``taste_unsure`` (a taste ask id), else None."""
+    ``skip``, ``skip_forced``, ``skip_item``, ``skip_dull``, ``skip_price``, ``details``, ``photo`` (a candidate id) or ``taste_post``, ``taste_never``, ``taste_unsure`` (a taste ask id), else None."""
     match = _DATA_RE.fullmatch(data or "")
     return (match.group(1), int(match.group(2))) if match else None
 
@@ -117,6 +119,8 @@ async def run_worker(verb: str, candidate_id: int, settings: Mapping[str, Any],
     Verb ``details`` (SEC-185) runs ``details <id> --card=<card> --json``; the caller always passes the
     tapped card, and the worker replies under it. Success is ``status: "sent"``; nothing about the
     candidate changes, so its timeout text says so.
+    Verb ``photo`` (SEC-185 item 2) runs ``photo <id> --card=<card> --json`` the same way: the worker edits the
+    preview's photo and the card's keyboard; success is ``status: "photo"`` with ``position`` and ``count``.
     ``card`` (SEC-44) is the message the tapped button is on: an approval applies only while that is
     still the candidate's current card. A ``stale_card`` refusal comes back as fixed text naming the
     newer card; any other refusal (``ok: false``) as the worker's own ``detail``, which the contract builds
@@ -154,6 +158,10 @@ async def run_worker(verb: str, candidate_id: int, settings: Mapping[str, Any],
             return WorkerAnswer(False, f"The worker did not answer within {timeout:g}s. Whether the Details "
                                        f"message for candidate {candidate_id} was sent is unknown: look under "
                                        "the card, and tap ℹ️ Details again if it is not there.")
+        if verb == "photo":
+            return WorkerAnswer(False, f"The worker did not answer within {timeout:g}s. Whether the photo of "
+                                       f"candidate {candidate_id} changed is unknown: look at the post above the "
+                                       "card before you approve.")
         subject = f"taste card {candidate_id} was answered" if taste else f"candidate {candidate_id} changed"
         return WorkerAnswer(False, f"The worker did not answer within {timeout:g}s. Whether {subject} is unknown: "
                                    + ("tap again to be sure." if taste else "ask Cawl for its status before retrying."))
@@ -169,6 +177,8 @@ async def run_worker(verb: str, candidate_id: int, settings: Mapping[str, Any],
         return WorkerAnswer(False, f"The worker gave no answer (exit {proc.returncode}). Details are in the "
                                    "gateway log.")
     if payload["ok"]:
+        if verb == "photo" and isinstance(payload.get("position"), int) and isinstance(payload.get("count"), int):
+            return WorkerAnswer(True, f"{payload['position']}/{payload['count']}")
         return WorkerAnswer(True, str(payload.get("status") or ""))
     if payload.get("error") == "stale_card":
         return WorkerAnswer(False, _stale_card_text(candidate_id, payload.get("card_message_id")))
