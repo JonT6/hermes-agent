@@ -551,3 +551,171 @@ class TestDetails:
         answer = await sd.run_worker("details", 5, settings, card=CARD_ID, timeout=0.3)
         assert not answer.ok and "unknown" in answer.text and "Details" in answer.text
         assert "changed" not in answer.text and len(answer.text) <= 200
+
+
+# --- SEC-185 item 2: ``sd:photo:<id>``, the compact card's 🖼️ Next photo button ------------------------
+
+PHOTO_DONE = {"ok": True, "id": 5, "status": "photo", "index": 1, "position": 2, "count": 6}
+
+
+class TestNextPhoto:
+    """The worker swaps the post preview's photo and the button's k/n itself. Cawl only toasts the new
+    position: it sends nothing and edits nothing, so the card keeps Approve."""
+
+    @pytest.mark.parametrize("data, want", [
+        ("sd:photo:5", ("photo", 5)), ("sd:photo:0012", ("photo", 12)), ("sd:photo:", None),
+        ("sd:photo:1x", None), ("sd:photos:5", None), ("sd:PHOTO:5", None), ("sd:photo:٥", None),
+        ("sd:photo:5\n", None), ("sd:photo:5:6", None)])
+    def test_parse_callback(self, data, want):
+        assert sd.parse_callback(data) == want
+
+    def test_the_regex_names_photo_on_the_one_line_check_cawl_reads(self):
+        import inspect
+        lines = [ln for ln in inspect.getsource(sd).splitlines() if ln.startswith("_DATA_RE = ")]
+        assert len(lines) == 1
+        assert re.search(r"sd:\((?=[^)]*\bphoto\b)", lines[0])
+
+    @pytest.mark.asyncio
+    async def test_tap_runs_the_worker_bound_to_the_tapped_card(self):
+        run = await _tap(_query("sd:photo:5"), answer=sd.WorkerAnswer(True, "2/6"))
+        run.assert_awaited_once_with("photo", 5, SETTINGS, card=CARD_ID)
+
+    @pytest.mark.asyncio
+    async def test_run_worker_argv_names_the_card_and_reads_the_position(self, tmp_path):
+        settings, workdir = _fake_worker(tmp_path, f"echo '{json.dumps(PHOTO_DONE)}'")
+        assert await sd.run_worker("photo", 5, settings, card=CARD_ID) == sd.WorkerAnswer(True, "2/6")
+        assert (workdir / "argv").read_text().strip() == f"photo 5 --card={CARD_ID} --json"
+
+    @pytest.mark.asyncio
+    async def test_run_worker_without_a_position_falls_back_to_the_status(self, tmp_path):
+        settings, _ = _fake_worker(tmp_path, "echo '{\"ok\": true, \"status\": \"photo\"}'")
+        assert await sd.run_worker("photo", 5, settings, card=CARD_ID) == sd.WorkerAnswer(True, "photo")
+
+    @pytest.mark.asyncio
+    async def test_success_only_toasts(self):
+        query = _query("sd:photo:5")
+        adapter = _adapter()
+        update = MagicMock()
+        update.callback_query = query
+        with patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": "*"}), \
+                patch.object(sd, "deals_settings", return_value=SETTINGS), \
+                patch.object(sd, "run_worker", AsyncMock(return_value=sd.WorkerAnswer(True, "2/6"))):
+            await adapter._handle_callback_query(update, MagicMock())
+        assert _answer_text(query) == "🖼️ Photo 2/6"
+        assert [c[0] for c in query.method_calls] == ["answer"]
+        assert adapter._bot.method_calls == []  # SEC-76: Cawl sends nothing anywhere
+
+    @pytest.mark.asyncio
+    async def test_refusal_is_a_visible_toast_and_the_card_is_untouched(self):
+        query = _query("sd:photo:5")
+        await _tap(query, answer=sd.WorkerAnswer(False, "candidate 5 is approved: its photo is fixed"))
+        assert query.answer.call_args.kwargs["show_alert"] is True
+        assert [c[0] for c in query.method_calls] == ["answer"]
+
+    @pytest.mark.asyncio
+    async def test_non_owner_is_refused(self):
+        query = _query("sd:photo:5", user_id="222")
+        run = await _tap(query)
+        run.assert_not_awaited()
+        assert _answer_text(query) == unauthorized_action_notice("telegram")
+
+    @pytest.mark.asyncio
+    async def test_no_card_message_id_runs_nothing(self):
+        query = _query("sd:photo:5")
+        query.message.message_id = None
+        run = await _tap(query)
+        run.assert_not_awaited()
+        assert "Nothing was changed" in _answer_text(query)
+
+    @pytest.mark.asyncio
+    async def test_timeout_says_to_look_at_the_post(self, tmp_path):
+        settings, _ = _fake_worker(tmp_path, "exec sleep 5")
+        answer = await sd.run_worker("photo", 5, settings, card=CARD_ID, timeout=0.3)
+        assert not answer.ok and "unknown" in answer.text and "photo" in answer.text
+        assert len(answer.text) <= 200
+
+
+# --- SEC-185 item 3: the daily digest's ``sd:open:<id>`` and ``sd:approve_pass:<digest_id>`` ---------------------
+
+
+class TestDigest:
+    """The worker sends the opened card and edits the digest itself; Cawl only toasts, sends and edits nothing."""
+
+    @pytest.mark.parametrize("data, want", [
+        ("sd:open:701", ("open", 701)), ("sd:approve_pass:3", ("approve_pass", 3)), ("sd:open:", None),
+        ("sd:approve_pass:x", None), ("sd:approve_all:3", None), ("sd:opens:5", None), ("sd:open:5\n", None)])
+    def test_parse_callback(self, data, want):
+        assert sd.parse_callback(data) == want
+
+    def test_the_regex_names_both_verbs_on_the_one_line_check_cawl_reads(self):
+        import inspect
+        lines = [ln for ln in inspect.getsource(sd).splitlines() if ln.startswith("_DATA_RE = ")]
+        assert len(lines) == 1
+        assert re.search(r"sd:\((?=[^)]*\bopen\b)", lines[0]) and re.search(r"sd:\((?=[^)]*\bapprove_pass\b)", lines[0])
+
+    @pytest.mark.asyncio
+    async def test_open_runs_the_worker_bound_to_the_digest(self, tmp_path):
+        settings, workdir = _fake_worker(tmp_path, "echo '{\"ok\": true, \"status\": \"sent\"}'")
+        assert await sd.run_worker("open", 701, settings, card=CARD_ID) == sd.WorkerAnswer(True, "sent")
+        assert (workdir / "argv").read_text().strip() == f"open 701 --digest={CARD_ID} --json"
+
+    @pytest.mark.asyncio
+    async def test_approve_pass_runs_digest_approve_and_counts(self, tmp_path):
+        out = {"ok": True, "status": "approved", "approved": [701, 705], "skipped": {"702": ["sold < 100"]}}
+        settings, workdir = _fake_worker(tmp_path, f"echo '{json.dumps(out)}'")
+        assert await sd.run_worker("approve_pass", 3, settings, card=CARD_ID) == sd.WorkerAnswer(True, "2")
+        assert (workdir / "argv").read_text().strip() == f"digest approve 3 --message={CARD_ID} --json"
+
+    @pytest.mark.asyncio
+    async def test_approve_pass_a_second_tap_is_already_approved_not_zero(self, tmp_path):
+        out = {"ok": True, "id": 3, "status": "already_approved", "approved": [], "skipped": {}, "approved_before": [701]}
+        settings, _ = _fake_worker(tmp_path, f"echo '{json.dumps(out)}'")
+        assert await sd.run_worker("approve_pass", 3, settings, card=CARD_ID) == sd.WorkerAnswer(True, "already_approved")
+
+    @pytest.mark.asyncio
+    async def test_approve_pass_a_first_tap_that_approved_nothing_is_zero(self, tmp_path):
+        out = {"ok": True, "id": 3, "status": "approved", "approved": [], "skipped": {"702": ["sold < 100"]}}
+        settings, _ = _fake_worker(tmp_path, f"echo '{json.dumps(out)}'")
+        assert await sd.run_worker("approve_pass", 3, settings, card=CARD_ID) == sd.WorkerAnswer(True, "0")
+
+    @pytest.mark.asyncio
+    async def test_stale_digest_has_its_own_text(self, tmp_path):
+        out = {"ok": False, "error": "stale_card", "detail": "x"}
+        settings, _ = _fake_worker(tmp_path, f"echo '{json.dumps(out)}'")
+        answer = await sd.run_worker("approve_pass", 3, settings, card=CARD_ID)
+        assert not answer.ok and "digest is out of date" in answer.text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("data, worker, toast", [
+        ("sd:open:701", "sent", "🗳️ Card #701 sent below"),
+        ("sd:approve_pass:3", "2", "✅ Approved 2"),
+        ("sd:approve_pass:3", "already_approved", "Already approved earlier: nothing new to approve"),
+        ("sd:approve_pass:3", "0", "Nothing passes now: nothing was approved"),
+    ])
+    async def test_success_only_toasts(self, data, worker, toast):
+        query = _query(data)
+        adapter = _adapter()
+        update = MagicMock()
+        update.callback_query = query
+        with patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": "*"}), \
+                patch.object(sd, "deals_settings", return_value=SETTINGS), \
+                patch.object(sd, "run_worker", AsyncMock(return_value=sd.WorkerAnswer(True, worker))) as run:
+            await adapter._handle_callback_query(update, MagicMock())
+        run.assert_awaited_once_with(*sd.parse_callback(data), SETTINGS, card=CARD_ID)
+        assert _answer_text(query) == toast
+        assert [c[0] for c in query.method_calls] == ["answer"]
+        assert adapter._bot.method_calls == []
+
+    @pytest.mark.asyncio
+    async def test_non_owner_cannot_approve_all(self):
+        query = _query("sd:approve_pass:3", user_id="222")
+        run = await _tap(query)
+        run.assert_not_awaited()
+        assert _answer_text(query) == unauthorized_action_notice("telegram")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verb", ["open", "approve_pass"])
+    async def test_timeouts_say_what_is_unknown(self, tmp_path, verb):
+        settings, _ = _fake_worker(tmp_path, "exec sleep 5")
+        answer = await sd.run_worker(verb, 3, settings, card=CARD_ID, timeout=0.3)
+        assert not answer.ok and "unknown" in answer.text and len(answer.text) <= 200
