@@ -633,3 +633,75 @@ class TestNextPhoto:
         answer = await sd.run_worker("photo", 5, settings, card=CARD_ID, timeout=0.3)
         assert not answer.ok and "unknown" in answer.text and "photo" in answer.text
         assert len(answer.text) <= 200
+
+
+# --- SEC-185 item 3: the daily digest's ``sd:open:<id>`` and ``sd:approve_pass:<digest_id>`` ---------------------
+
+
+class TestDigest:
+    """The worker sends the opened card and edits the digest itself; Cawl only toasts, sends and edits nothing."""
+
+    @pytest.mark.parametrize("data, want", [
+        ("sd:open:701", ("open", 701)), ("sd:approve_pass:3", ("approve_pass", 3)), ("sd:open:", None),
+        ("sd:approve_pass:x", None), ("sd:approve_all:3", None), ("sd:opens:5", None), ("sd:open:5\n", None)])
+    def test_parse_callback(self, data, want):
+        assert sd.parse_callback(data) == want
+
+    def test_the_regex_names_both_verbs_on_the_one_line_check_cawl_reads(self):
+        import inspect
+        lines = [ln for ln in inspect.getsource(sd).splitlines() if ln.startswith("_DATA_RE = ")]
+        assert len(lines) == 1
+        assert re.search(r"sd:\((?=[^)]*\bopen\b)", lines[0]) and re.search(r"sd:\((?=[^)]*\bapprove_pass\b)", lines[0])
+
+    @pytest.mark.asyncio
+    async def test_open_runs_the_worker_bound_to_the_digest(self, tmp_path):
+        settings, workdir = _fake_worker(tmp_path, "echo '{\"ok\": true, \"status\": \"sent\"}'")
+        assert await sd.run_worker("open", 701, settings, card=CARD_ID) == sd.WorkerAnswer(True, "sent")
+        assert (workdir / "argv").read_text().strip() == f"open 701 --digest={CARD_ID} --json"
+
+    @pytest.mark.asyncio
+    async def test_approve_pass_runs_digest_approve_and_counts(self, tmp_path):
+        out = {"ok": True, "status": "approved", "approved": [701, 705], "skipped": {"702": ["sold < 100"]}}
+        settings, workdir = _fake_worker(tmp_path, f"echo '{json.dumps(out)}'")
+        assert await sd.run_worker("approve_pass", 3, settings, card=CARD_ID) == sd.WorkerAnswer(True, "2")
+        assert (workdir / "argv").read_text().strip() == f"digest approve 3 --message={CARD_ID} --json"
+
+    @pytest.mark.asyncio
+    async def test_stale_digest_has_its_own_text(self, tmp_path):
+        out = {"ok": False, "error": "stale_card", "detail": "x"}
+        settings, _ = _fake_worker(tmp_path, f"echo '{json.dumps(out)}'")
+        answer = await sd.run_worker("approve_pass", 3, settings, card=CARD_ID)
+        assert not answer.ok and "digest is out of date" in answer.text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("data, worker, toast", [
+        ("sd:open:701", "sent", "🗳️ Card #701 sent below"),
+        ("sd:approve_pass:3", "2", "✅ Approved 2"),
+    ])
+    async def test_success_only_toasts(self, data, worker, toast):
+        query = _query(data)
+        adapter = _adapter()
+        update = MagicMock()
+        update.callback_query = query
+        with patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": "*"}), \
+                patch.object(sd, "deals_settings", return_value=SETTINGS), \
+                patch.object(sd, "run_worker", AsyncMock(return_value=sd.WorkerAnswer(True, worker))) as run:
+            await adapter._handle_callback_query(update, MagicMock())
+        run.assert_awaited_once_with(*sd.parse_callback(data), SETTINGS, card=CARD_ID)
+        assert _answer_text(query) == toast
+        assert [c[0] for c in query.method_calls] == ["answer"]
+        assert adapter._bot.method_calls == []
+
+    @pytest.mark.asyncio
+    async def test_non_owner_cannot_approve_all(self):
+        query = _query("sd:approve_pass:3", user_id="222")
+        run = await _tap(query)
+        run.assert_not_awaited()
+        assert _answer_text(query) == unauthorized_action_notice("telegram")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verb", ["open", "approve_pass"])
+    async def test_timeouts_say_what_is_unknown(self, tmp_path, verb):
+        settings, _ = _fake_worker(tmp_path, "exec sleep 5")
+        answer = await sd.run_worker(verb, 3, settings, card=CARD_ID, timeout=0.3)
+        assert not answer.ok and "unknown" in answer.text and len(answer.text) <= 200

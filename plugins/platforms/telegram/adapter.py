@@ -4999,7 +4999,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
     _SD_TASTE_LABELS = {"post": "👍 Would post", "never": "👎 Never", "unsure": "🤷 Not sure"}
 
     async def _handle_deals_callback(self, query, data: str, cb: Dict[str, Any]) -> None:
-        """``sd:<approve|approve_both|skip|skip_forced|skip_item|skip_dull|skip_price|details|photo|taste_post|
+        """``sd:<approve|approve_both|skip|skip_forced|skip_item|skip_dull|skip_price|details|photo|open|approve_pass|taste_post|
         taste_never|taste_unsure>:<id>`` — a secret-deals card button (SEC-71, SEC-102, SEC-125, SEC-186,
         SEC-185). A reasoned skip
         is answered and edited exactly like ``skip``: the worker's status is ``skipped``.
@@ -5031,11 +5031,12 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
             await query.answer(text=_unauthorized())
             return
         approves = verb in ("approve", "approve_both")
-        bound = approves or verb in ("details", "photo")
+        bound = approves or verb in ("details", "photo", "open", "approve_pass")
         card = getattr(query.message, "message_id", None) if bound else None
         if bound and (not isinstance(card, int) or isinstance(card, bool)):
             what = ("the approval cannot be bound to it" if approves
-                    else "Details cannot be sent under it" if verb == "details" else "its photo cannot be changed")
+                    else "Details cannot be sent under it" if verb == "details"
+                    else "its photo cannot be changed" if verb == "photo" else "the digest cannot be checked")
             await query.answer(text=f"Cannot tell which card this button is on, so {what}. Nothing was changed.",
                                show_alert=True)
             return
@@ -5049,6 +5050,12 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
             return
         if verb == "photo":  # SEC-185 item 2: the worker swapped the preview's photo and the button's k/n itself
             await query.answer(text=f"🖼️ Photo {answer.text}" if answer.text else "🖼️ Photo changed")
+            return
+        if verb == "open":  # SEC-185 item 3: the worker sent the candidate's preview + card under the digest
+            await query.answer(text=f"🗳️ Card #{candidate_id} sent below")
+            return
+        if verb == "approve_pass":  # SEC-185 item 3: the worker approved and edited the digest itself
+            await query.answer(text=f"✅ Approved {answer.text}" if answer.text.isdigit() else "✅ Approved")
             return
         if verb in _sd.TASTE_ANSWERS:
             await self._finish_taste_tap(query, verb, answer.text)

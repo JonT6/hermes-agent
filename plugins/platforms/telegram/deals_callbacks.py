@@ -16,6 +16,10 @@ SEC-185: ``sd:details:<id>`` runs ``details <id> --card=<tapped card> --json``. 
 message itself, as a reply to that card; Cawl sends nothing and only answers the tap.
 ``sd:photo:<id>`` (SEC-185 item 2, Next photo) runs ``photo <id> --card=<tapped card> --json``. The worker swaps
 the photo on the post preview above the card and the button's ``k/n`` itself; Cawl only answers the tap.
+SEC-185 item 3, the daily digest: ``sd:open:<id>`` (a ``#id`` button) runs ``open <id> --digest=<tapped digest>
+--json``, and the worker sends that candidate's preview + card under the digest. ``sd:approve_pass:<digest_id>`` runs
+``digest approve <digest_id> --message=<tapped digest> --json``: the worker approves every candidate on that digest
+that still passes the thresholds, through its normal approve path, and edits the digest itself. Both only toast here.
 
 SEC-125: the daily taste batch posts one-photo cards to the Ops group's Taste topic with 👍 / 👎 / 🤷. Those
 three verbs carry a taste *ask* id (not a candidate id) and run the worker's ``taste answer <ask_id>
@@ -48,7 +52,7 @@ _STDERR_LOG_CHARS = 2000
 
 # [0-9], not \d: \d also matches non-ASCII digits. fullmatch, not $: $ allows a trailing newline.
 # One literal on ONE line: the worker's check-cawl reads this source for `sd:(<verbs>):` (SEC-80/125/186/185).
-_DATA_RE = re.compile(r"sd:(approve|approve_both|skip|skip_forced|skip_item|skip_dull|skip_price|details|photo|taste_post|taste_never|taste_unsure):([0-9]+)")  # noqa: E501
+_DATA_RE = re.compile(r"sd:(approve|approve_both|skip|skip_forced|skip_item|skip_dull|skip_price|details|photo|open|approve_pass|taste_post|taste_never|taste_unsure):([0-9]+)")  # noqa: E501
 
 # SEC-186: a reasoned skip runs the plain ``skip <id> --reason <reason> --json``.
 SKIP_REASONS = {"skip_forced": "reason:forced", "skip_item": "reason:item",
@@ -68,7 +72,7 @@ class WorkerAnswer:
 
 def parse_callback(data: str) -> Optional[tuple[str, int]]:
     """``(verb, id)`` for exactly ``sd:<verb>:<digits>`` with verb one of ``approve``, ``approve_both``,
-    ``skip``, ``skip_forced``, ``skip_item``, ``skip_dull``, ``skip_price``, ``details``, ``photo`` (a candidate id) or ``taste_post``, ``taste_never``, ``taste_unsure`` (a taste ask id), else None."""
+    ``skip``, ``skip_forced``, ``skip_item``, ``skip_dull``, ``skip_price``, ``details``, ``photo``, ``open`` (a candidate id), ``approve_pass`` (a digest id) or ``taste_post``, ``taste_never``, ``taste_unsure`` (a taste ask id), else None."""
     match = _DATA_RE.fullmatch(data or "")
     return (match.group(1), int(match.group(2))) if match else None
 
@@ -133,8 +137,13 @@ async def run_worker(verb: str, candidate_id: int, settings: Mapping[str, Any],
     script = Path(str(python)).parent / "secret-deals"  # the venv's console script, as launchd runs it
     taste = verb in TASTE_ANSWERS
     skip_reason = SKIP_REASONS.get(verb)
+    bound = [] if card is None else [card]
     if taste:
         argv = ["taste", "answer", str(candidate_id), TASTE_ANSWERS[verb], "--json"]
+    elif verb == "open":  # SEC-185 item 3: ``card`` is the digest message the #id button is on
+        argv = ["open", str(candidate_id), *[f"--digest={m}" for m in bound], "--json"]
+    elif verb == "approve_pass":  # SEC-185 item 3: the id is the digest's; ``card`` its message
+        argv = ["digest", "approve", str(candidate_id), *[f"--message={m}" for m in bound], "--json"]
     elif skip_reason:
         argv = ["skip", str(candidate_id), "--reason", skip_reason, "--json"]
     else:
@@ -158,6 +167,13 @@ async def run_worker(verb: str, candidate_id: int, settings: Mapping[str, Any],
             return WorkerAnswer(False, f"The worker did not answer within {timeout:g}s. Whether the Details "
                                        f"message for candidate {candidate_id} was sent is unknown: look under "
                                        "the card, and tap ℹ️ Details again if it is not there.")
+        if verb == "approve_pass":
+            return WorkerAnswer(False, f"The worker did not answer within {timeout:g}s. Which candidates of digest "
+                                       f"{candidate_id} were approved is unknown: check ✅ Approvals before tapping "
+                                       "again (a second tap approves nothing twice).")
+        if verb == "open":
+            return WorkerAnswer(False, f"The worker did not answer within {timeout:g}s. Whether the card for "
+                                       f"candidate {candidate_id} was sent is unknown: look below the digest.")
         if verb == "photo":
             return WorkerAnswer(False, f"The worker did not answer within {timeout:g}s. Whether the photo of "
                                        f"candidate {candidate_id} changed is unknown: look at the post above the "
@@ -179,7 +195,11 @@ async def run_worker(verb: str, candidate_id: int, settings: Mapping[str, Any],
     if payload["ok"]:
         if verb == "photo" and isinstance(payload.get("position"), int) and isinstance(payload.get("count"), int):
             return WorkerAnswer(True, f"{payload['position']}/{payload['count']}")
+        if verb == "approve_pass" and isinstance(payload.get("approved"), list):
+            return WorkerAnswer(True, str(len(payload["approved"])))
         return WorkerAnswer(True, str(payload.get("status") or ""))
+    if payload.get("error") == "stale_card" and verb in ("open", "approve_pass"):
+        return WorkerAnswer(False, "That digest is out of date: use today's digest. Nothing was changed.")
     if payload.get("error") == "stale_card":
         return WorkerAnswer(False, _stale_card_text(candidate_id, payload.get("card_message_id")))
     detail = str(payload.get("detail") or "").strip()
